@@ -105,46 +105,35 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
 
       const result = await matchmakingService.joinMatchmaking(userProfile.uid, userProfile.username, selectedMode)
 
-      // Check if result is a room ID (immediate match) or matchmaking ID (waiting)
-      if (result.length > 15) {
-        // Looks like a room ID (longer string)
-        console.log("🎉 Immediate match found!")
-        setCurrentMatch(result)
-        await presenceService.updateStatus("in-game", result)
+      if (result.matched && result.roomId) {
+        // Immediate match
+        setCurrentMatch(result.roomId)
+        await presenceService.updateStatus("in-game", result.roomId)
         setMatchmaking(false)
-
         toast({
           title: "🎉 Match Found!",
           description: "Opponent found! Starting game...",
         })
       } else {
-        // Matchmaking ID (waiting for opponent)
-        console.log("⏳ Waiting for opponent...")
-        setMatchmakingId(result)
-
+        // Waiting for opponent
+        setMatchmakingId(userProfile.uid)
         toast({
           title: "🔍 Searching for Opponent",
           description: `Looking for players in ${GAME_MODES.find((m) => m.id === selectedMode)?.name}...`,
         })
-
         // Listen for match
-        const unsubscribe = matchmakingService.listenForMatch(result, (roomId) => {
-          console.log("🎯 Match found via listener:", roomId)
+        const unsubscribe = matchmakingService.listenForMatch(userProfile.uid, (roomId) => {
           setCurrentMatch(roomId)
           setMatchmaking(false)
           setMatchmakingId(null)
           presenceService.updateStatus("in-game", roomId)
-
           toast({
             title: "🎉 Match Found!",
             description: "Opponent found! Starting game...",
           })
-
-          // Clean up listener
           unsubscribe()
           setMatchmakingUnsubscribe(null)
         })
-
         setMatchmakingUnsubscribe(() => unsubscribe)
       }
     } catch (error: any) {

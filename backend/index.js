@@ -1,6 +1,9 @@
 import express from "express";
+import cors from "cors";
 import { handleMatchmaking } from "./games/tictactoe.js";
 const app = express();
+
+app.use(cors({ origin: "http://localhost:3000" })); // Allow your frontend origin
 app.use(express.json());
 
 app.post("/matchmaking/tictactoe", async (req, res) => {
