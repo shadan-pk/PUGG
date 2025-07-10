@@ -2,20 +2,18 @@ import { initializeApp } from "firebase/app"
 import { getFirestore } from "firebase/firestore"
 import { getAuth } from "firebase/auth"
 
-// TEMPORARY: Hard-coded Firebase configuration for testing
+// Firebase configuration
 const firebaseConfig = {
-  apiKey: "YOUR_ACTUAL_API_KEY_HERE",
-  authDomain: "tictactoe-bc835.firebaseapp.com",
-  projectId: "tictactoe-bc835",
-  storageBucket: "tictactoe-bc835.appspot.com",
-  messagingSenderId: "YOUR_ACTUAL_SENDER_ID_HERE",
-  appId: "YOUR_ACTUAL_APP_ID_HERE",
-  measurementId: "YOUR_ACTUAL_MEASUREMENT_ID_HERE",
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
+  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
 }
 
-console.log("🔥 Using hard-coded Firebase config for testing")
-
-// Validate Firebase configuration - ONLY for Firestore (removed DATABASE_URL)
+// Validate Firebase configuration
 const requiredEnvVars = [
   "NEXT_PUBLIC_FIREBASE_API_KEY",
   "NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN",
@@ -25,24 +23,17 @@ const requiredEnvVars = [
   "NEXT_PUBLIC_FIREBASE_APP_ID",
 ]
 
-// Comment out this section temporarily
-/*
 const missingEnvVars = requiredEnvVars.filter((envVar) => !process.env[envVar])
 
 if (missingEnvVars.length > 0) {
   console.error("❌ Missing Firebase environment variables:", missingEnvVars)
   console.log("🎭 Running in demo mode - add Firebase config for real multiplayer!")
-  console.log("📋 Create a .env.local file in your project root with:")
-  missingEnvVars.forEach((envVar) => {
-    console.log(`   ${envVar}=your_value_here`)
-  })
 }
-*/
 
 console.log("🔥 Firebase configuration status:", {
   projectId: firebaseConfig.projectId || "not configured",
   authDomain: firebaseConfig.authDomain || "not configured",
-  configured: true, // Hardcoded config means it's configured
+  configured: missingEnvVars.length === 0,
 })
 
 // Initialize Firebase
@@ -52,10 +43,10 @@ const app = initializeApp(firebaseConfig)
 export const db = getFirestore(app)
 export const auth = getAuth(app)
 
-console.log("✅ Firebase initialized with Firestore")
+console.log("✅ Firebase initialized with Firestore and Auth")
 
 // Export configuration status
-export const isFirebaseConfigured = true // Hardcoded config means it's configured
+export const isFirebaseConfigured = missingEnvVars.length === 0
 export const isMockMode = !isFirebaseConfigured
 
 // Enhanced mock database for development when Firebase is not available
