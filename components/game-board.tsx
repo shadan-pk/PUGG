@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react"
 import { doc, onSnapshot, updateDoc } from "firebase/firestore"
-import { db, isFirebaseConfigured } from "@/lib/firebase"
+import { db } from "@/lib/firebase"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -50,15 +50,6 @@ export default function GameBoard({
   const { toast } = useToast()
 
   useEffect(() => {
-    if (!isFirebaseConfigured) {
-      toast({
-        title: "Demo Mode",
-        description: "Set up Firestore for real-time gameplay.",
-        variant: "destructive",
-      })
-      return
-    }
-
     console.log("🎮 Setting up Firestore listener for room:", roomId)
 
     // Validate roomId
@@ -89,7 +80,6 @@ export default function GameBoard({
               description: "This room no longer exists.",
               variant: "destructive",
             })
-            // Don't call onLeave immediately, let user decide
           }
         },
         (error) => {
@@ -119,7 +109,7 @@ export default function GameBoard({
   }, [roomId, onLeave, toast])
 
   const makeMove = async (index: number) => {
-    if (!roomData || roomData.gameState.board[index] || roomData.gameState.winner || !isFirebaseConfigured) return
+    if (!roomData || roomData.gameState.board[index] || roomData.gameState.winner) return
 
     const { gameState } = roomData
     const isPlayerX = gameState.playerX === user.uid
@@ -183,7 +173,7 @@ export default function GameBoard({
   }
 
   const resetGame = async () => {
-    if (!roomData || !isFirebaseConfigured) return
+    if (!roomData) return
 
     setLoading(true)
     try {
@@ -268,21 +258,6 @@ export default function GameBoard({
     return null
   }
 
-  // Handle demo mode
-  if (!isFirebaseConfigured) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-center">
-          <div className="p-4 border rounded-lg">
-            <h2 className="text-xl font-bold mb-2">Demo Mode</h2>
-            <p className="text-gray-600 mb-4">Set up Firestore to play real games!</p>
-            <Button onClick={onLeave}>Back to Lobby</Button>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
   // Handle connection errors
   if (connectionError) {
     return (
@@ -349,7 +324,7 @@ export default function GameBoard({
               </Button>
             </div>
             <Badge variant="default" className="text-xs mt-1">
-              🔥 Firestore Live
+              🔥 Live Game
             </Badge>
           </div>
           <Button onClick={resetGame} variant="outline" size="sm" disabled={loading}>
@@ -459,7 +434,7 @@ export default function GameBoard({
               </div>
               <div>
                 <p className="text-2xl font-bold">🔥</p>
-                <p className="text-sm text-gray-500">Firestore Live</p>
+                <p className="text-sm text-gray-500">Live Game</p>
               </div>
             </div>
           </CardContent>

@@ -28,73 +28,65 @@ export interface MatchmakingEntry {
 export class MatchmakingService {
   private unsubscribe: (() => void) | null = null
 
+  /**
+   * Join matchmaking. Returns the matchmaking document id to listen for updates.
+   * Only one matchmaking document is created per player. When a match is found, the first player's document is updated.
+   */
+  /**
+   * PUBG-like matchmaking: players join a pool, and when enough are present, all are matched at once.
+   * Each player listens to their own matchmaking doc for updates.
+   */
   async joinMatchmaking(userId: string, username: string, gameMode: string): Promise<string> {
-    console.log("🔍 Joining matchmaking:", { userId, username, gameMode })
+    console.log("🔍 Joining matchmaking (wait for pool):", { userId, username, gameMode })
 
-    // Now we can use the full query with the index you created
-    const matchmakingQuery = query(
+    // Add this player to the matchmaking pool
+    const docRef = await addDoc(collection(db, "matchmaking"), {
+      userId,
+      username,
+      gameMode,
+      status: "searching",
+      createdAt: serverTimestamp(),
+    })
+
+    // Check if there is another player already waiting in the pool (not this user)
+    const poolQuery = query(
       collection(db, "matchmaking"),
       where("gameMode", "==", gameMode),
       where("status", "==", "searching"),
       orderBy("createdAt", "asc"),
-      limit(5),
+      limit(2),
     )
-
-    const existingMatches = await getDocs(matchmakingQuery)
-
-    // Filter out current user client-side (since we can't use != in compound queries)
-    const availableMatches = existingMatches.docs.filter((doc) => {
-      const data = doc.data() as MatchmakingEntry
-      return data.userId !== userId
-    })
-
-    if (availableMatches.length > 0) {
-      // Found a match! Create a game room
-      const opponentDoc = availableMatches[0]
-      const opponent = opponentDoc.data() as MatchmakingEntry
-
-      console.log("🎯 Found opponent:", opponent.username)
-
-      // Create game room
-      const roomId = await this.createGameRoom(
-        { userId, username },
-        { userId: opponent.userId, username: opponent.username },
-        gameMode,
-      )
-
-      // Update opponent's matchmaking entry
-      await updateDoc(doc(db, "matchmaking", opponentDoc.id), {
-        status: "matched",
-        matchedWith: userId,
-        roomId: roomId,
-      })
-
-      // Create our matchmaking entry as matched
-      await addDoc(collection(db, "matchmaking"), {
-        userId,
-        username,
-        gameMode,
-        status: "matched",
-        createdAt: serverTimestamp(),
-        matchedWith: opponent.userId,
-        roomId: roomId,
-      })
-
-      return roomId
-    } else {
-      // No match found, add to queue
-      console.log("⏳ No opponent found, joining queue...")
-
-      const docRef = await addDoc(collection(db, "matchmaking"), {
-        userId,
-        username,
-        gameMode,
-        status: "searching",
-        createdAt: serverTimestamp(),
-      })
-
-      return docRef.id // Return matchmaking ID to listen for matches
+    const poolSnapshot = await getDocs(poolQuery)
+    // Only match if there are exactly 2 players (including this one)
+    if (poolSnapshot.size === 2) {
+      const players = poolSnapshot.docs.map((doc) => ({
+        id: doc.id,
+        ...(doc.data() as MatchmakingEntry),
+      }))
+      // Only proceed if both are still searching
+      if (players.every((p) => p.status === "searching")) {
+        // Create a game room for both
+        const roomId = await this.createGameRoom(
+          { userId: players[0].userId, username: players[0].username },
+          { userId: players[1].userId, username: players[1].username },
+          gameMode,
+        )
+        // Update both players' matchmaking entries to matched and set roomId
+        await Promise.all(
+          players.map((player) =>
+            updateDoc(doc(db, "matchmaking", player.id), {
+              status: "matched",
+              matchedWith: players.find((p) => p.id !== player.id)?.userId,
+              roomId,
+            })
+          )
+        )
+        console.log("🎮 Match found! Players:", players.map((p) => p.username).join(", "))
+      }
     }
+
+    // Return this player's matchmaking doc id (client should listen for status: 'matched' and roomId)
+    return docRef.id
   }
 
   private async createGameRoom(
@@ -135,26 +127,41 @@ export class MatchmakingService {
     return roomRef.id
   }
 
+  /**
+   * Listen for match updates on a matchmaking document. Calls onMatch(roomId) when matched.
+   */
   listenForMatch(matchmakingId: string, onMatch: (roomId: string) => void): () => void {
     console.log("👂 Listening for match:", matchmakingId)
-
     this.unsubscribe = onSnapshot(doc(db, "matchmaking", matchmakingId), (docSnapshot) => {
       if (docSnapshot.exists()) {
         const data = docSnapshot.data() as MatchmakingEntry
         console.log("📡 Matchmaking update:", data)
-
         if (data.status === "matched" && data.roomId) {
           console.log("🎉 Match found! Room:", data.roomId)
           onMatch(data.roomId)
         }
       }
     })
-
     return () => {
       if (this.unsubscribe) {
         this.unsubscribe()
         this.unsubscribe = null
       }
+    }
+  }
+  /**
+   * Call this after the game is finished to remove the matchmaking document.
+   */
+  async removeMatchmakingEntry(matchmakingId: string): Promise<void> {
+    try {
+      await deleteDoc(doc(db, "matchmaking", matchmakingId))
+      console.log("✅ Matchmaking entry removed")
+    } catch (error) {
+      console.error("❌ Error removing matchmaking entry:", error)
+    }
+    if (this.unsubscribe) {
+      this.unsubscribe()
+      this.unsubscribe = null
     }
   }
 
@@ -192,3 +199,5 @@ export class MatchmakingService {
     console.log(`🧹 Cleaned up ${oldEntries.docs.length} old matchmaking entries`)
   }
 }
+
+
