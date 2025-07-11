@@ -556,7 +556,12 @@ async function cleanupResultScreen(roomId) {
       return;
     }
     
-    const sessionKey = `tictactoe:session:${roomId}`;
+    // Extract game type from room ID (format: gameType-timestamp-random)
+    const parts = roomId.split('-');
+    const gameType = parts.slice(0, -2).join('-');
+    
+    // Try to find session data for this game type
+    const sessionKey = `${gameType}:session:${roomId}`;
     const sessionData = await redis.get(sessionKey);
     
     if (sessionData) {
@@ -574,7 +579,7 @@ async function cleanupResultScreen(roomId) {
         await redis.del(`user:${playerO}:session`);
         
         // Also remove from queue if they're still there
-        const queueKey = 'tictactoe:queue';
+        const queueKey = `${gameType}:queue`;
         const queue = await redis.lRange(queueKey, 0, -1);
         for (let i = 0; i < queue.length; i++) {
           const player = JSON.parse(queue[i]);
@@ -584,10 +589,10 @@ async function cleanupResultScreen(roomId) {
           }
         }
         
-        console.log(`Deleted session and user mappings for room: ${roomId}`);
+        console.log(`Deleted session and user mappings for room: ${roomId} (game: ${gameType})`);
       }
     } else {
-      console.log(`Session data not found for room: ${roomId}`);
+      console.log(`Session data not found for room: ${roomId} (game: ${gameType})`);
     }
     
     // Clear tracking data

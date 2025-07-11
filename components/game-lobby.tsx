@@ -12,7 +12,7 @@ import { TicTacToeRenderer } from "@/components/game-renderers/tictactoe-rendere
 import { ConnectFourRenderer } from "@/components/game-renderers/connect-four-renderer"
 import { matchmakingService } from "@/lib/matchmaking" // Use singleton instance
 import { PresenceService, type UserPresence } from "@/lib/presence"
-import { Users, Trophy, LogOut, Target, Crown, Zap, Clock, Star, X, Search } from "lucide-react"
+import { Users, Trophy, LogOut, Target, Crown, Zap, Clock, Star, X, Search, AlertCircle } from "lucide-react"
 
 interface UserProfile {
   uid: string
@@ -50,10 +50,16 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
   const [selectedGame, setSelectedGame] = useState<string>("")
   const [matchmaking, setMatchmaking] = useState(false)
   const [currentMatch, setCurrentMatch] = useState<string | null>(null)
+  const [lastMatchmakingStart, setLastMatchmakingStart] = useState<number>(0)
   const [onlineUsers, setOnlineUsers] = useState<UserPresence[]>([])
   const [presenceService] = useState(() => new PresenceService(userProfile.uid, userProfile.username))
   const [matchmakingUnsubscribe, setMatchmakingUnsubscribe] = useState<(() => void) | null>(null)
+  const [resultScreenCooldown, setResultScreenCooldown] = useState<number>(0)
+  const [isOnResultScreen, setIsOnResultScreen] = useState(false)
   const { toast } = useToast()
+
+  // Check if user can enter matchmaking
+  const canEnterMatchmaking = !isOnResultScreen && resultScreenCooldown === 0
 
   // Fetch available games from backend
   useEffect(() => {
@@ -81,8 +87,26 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
   // Handle match found callback
   const handleMatchFound = useCallback((roomId: string) => {
     console.log(`🎉 Match found! Room ID: ${roomId}`)
+    console.log(`🔍 Previous currentMatch: ${currentMatch}`)
+    console.log(`⏰ Last matchmaking start: ${lastMatchmakingStart}`)
+    
+    // Extract timestamp from room ID to validate it's a fresh match
+    const parts = roomId.split('-');
+    if (parts.length >= 2) {
+      const roomTimestamp = parseInt(parts[parts.length - 2]);
+      const timeDiff = roomTimestamp - lastMatchmakingStart;
+      
+      // If the room was created more than 10 seconds before we started matchmaking, ignore it
+      if (timeDiff < -10000) {
+        console.log(`⚠️ Ignoring old room ID: ${roomId} (created ${timeDiff}ms before matchmaking start)`);
+        return;
+      }
+    }
+    
     setCurrentMatch(roomId)
     setMatchmaking(false)
+    setIsOnResultScreen(false) // Reset result screen state
+    setResultScreenCooldown(0) // Reset cooldown
     presenceService.updateStatus("in-game", roomId)
     
     // Clean up matchmaking listener
@@ -95,7 +119,7 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
       title: "🎉 Match Found!",
       description: "Opponent found! Starting game...",
     })
-  }, [presenceService, matchmakingUnsubscribe, toast])
+  }, [presenceService, matchmakingUnsubscribe, toast, currentMatch, lastMatchmakingStart])
 
   useEffect(() => {
     // Set user online when component mounts
@@ -121,7 +145,48 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
     }
   }, [presenceService, matchmakingUnsubscribe])
 
+  // Handle result screen state changes
+  const handleResultScreenEnter = useCallback(() => {
+    console.log("🎭 User entered result screen")
+    setIsOnResultScreen(true)
+  }, [])
+
+  const handleResultScreenLeave = useCallback(() => {
+    console.log("🎭 User left result screen, starting cooldown")
+    setIsOnResultScreen(false)
+    setResultScreenCooldown(5) // 5 second cooldown
+    
+    // Start cooldown timer
+    const cooldownInterval = setInterval(() => {
+      setResultScreenCooldown((prev) => {
+        if (prev <= 1) {
+          clearInterval(cooldownInterval)
+          return 0
+        }
+        return prev - 1
+      })
+    }, 1000)
+  }, [])
+
   const handleStartMatch = async () => {
+    // Prevent matchmaking if on result screen or in cooldown
+    if (!canEnterMatchmaking) {
+      if (isOnResultScreen) {
+        toast({
+          title: "⚠️ Still on Result Screen",
+          description: "Please wait for the result screen to finish before starting a new match.",
+          variant: "destructive",
+        })
+      } else if (resultScreenCooldown > 0) {
+        toast({
+          title: "⏳ Cooldown Active",
+          description: `Please wait ${resultScreenCooldown} seconds before starting a new match.`,
+          variant: "destructive",
+        })
+      }
+      return
+    }
+
     // Prevent multiple matchmaking attempts
     if (matchmaking || matchmakingService.isMatchmakingInProgress(userProfile.uid)) {
       console.log("⚠️ Matchmaking already in progress")
@@ -138,6 +203,7 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
     }
 
     setMatchmaking(true)
+    setLastMatchmakingStart(Date.now())
 
     try {
       console.log("🎮 Starting matchmaking for:", selectedGame)
@@ -208,6 +274,12 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
   }
 
   const handleLeaveGame = async () => {
+    console.log(`🚪 Leaving game, clearing currentMatch: ${currentMatch}`)
+    
+    // Reset result screen state when leaving game
+    setIsOnResultScreen(false)
+    setResultScreenCooldown(0)
+    
     setCurrentMatch(null)
     await presenceService.updateStatus("online")
 
@@ -246,6 +318,7 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
   }
 
   if (currentMatch) {
+    console.log(`🎮 Rendering game board for currentMatch: ${currentMatch}`);
     // Extract game type from room ID (format: gameType-timestamp-random)
     console.log("🔍 Room ID:", currentMatch);
     
@@ -277,6 +350,8 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
         roomId={currentMatch} 
         user={userProfile} 
         onLeave={handleLeaveGame}
+        onResultScreenEnter={handleResultScreenEnter}
+        onResultScreenLeave={handleResultScreenLeave}
         gameRenderer={gameRenderer}
       />
     )
@@ -420,14 +495,38 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
                 </CardTitle>
               </CardHeader>
               <CardContent>
+                {/* Show cooldown warning if active */}
+                {resultScreenCooldown > 0 && (
+                  <div className="mb-3 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
+                    <div className="flex items-center space-x-2 text-amber-400">
+                      <Clock className="w-4 h-4" />
+                      <span className="text-sm font-medium">
+                        Cooldown: {resultScreenCooldown}s remaining
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Show result screen warning if active */}
+                {isOnResultScreen && (
+                  <div className="mb-3 p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
+                    <div className="flex items-center space-x-2 text-red-400">
+                      <AlertCircle className="w-4 h-4" />
+                      <span className="text-sm font-medium">
+                        Please wait for result screen to finish
+                      </span>
+                    </div>
+                  </div>
+                )}
+
                 {!matchmaking ? (
                   <Button
                     onClick={handleStartMatch}
                     className="w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-semibold py-3"
-                    disabled={!selectedGame}
+                    disabled={!selectedGame || !canEnterMatchmaking}
                   >
                     <Search className="w-4 h-4 mr-2" />
-                    Find Match
+                    {!canEnterMatchmaking ? "Matchmaking Unavailable" : "Find Match"}
                   </Button>
                 ) : (
                   <div className="space-y-3">

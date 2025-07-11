@@ -47,6 +47,8 @@ interface GenericGameBoardProps {
   roomId: string
   user: MockUser
   onLeave: () => void
+  onResultScreenEnter?: () => void
+  onResultScreenLeave?: () => void
   gameRenderer: GameRenderer
 }
 
@@ -55,11 +57,14 @@ export default function GenericGameBoard({
   roomId,
   user,
   onLeave,
+  onResultScreenEnter,
+  onResultScreenLeave,
   gameRenderer
 }: GenericGameBoardProps) {
   const [roomData, setRoomData] = useState<RoomData | null>(null)
   const [loading, setLoading] = useState(false)
   const [connectionError, setConnectionError] = useState<string | null>(null)
+  const [wasOnResultScreen, setWasOnResultScreen] = useState(false)
   const { toast } = useToast()
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const [leaving, setLeaving] = useState(false);
@@ -90,6 +95,23 @@ export default function GenericGameBoard({
       stopped = true;
     };
   }, [roomId, gameType]);
+
+  // Track result screen state changes
+  useEffect(() => {
+    if (roomData && gameRenderer.isGameFinished(roomData.gameState)) {
+      if (!wasOnResultScreen) {
+        console.log("🎭 Game finished, entering result screen")
+        setWasOnResultScreen(true)
+        onResultScreenEnter?.()
+      }
+    } else {
+      if (wasOnResultScreen) {
+        console.log("🎭 Game no longer finished, leaving result screen")
+        setWasOnResultScreen(false)
+        onResultScreenLeave?.()
+      }
+    }
+  }, [roomData, gameRenderer, wasOnResultScreen, onResultScreenEnter, onResultScreenLeave])
 
   const makeMove = async (moveData: any) => {
     if (!roomData || gameRenderer.isGameFinished(roomData.gameState)) return
@@ -179,6 +201,10 @@ export default function GenericGameBoard({
     } finally {
       setLeaving(false);
       setShowLeaveConfirm(false);
+      // Call result screen leave callback if we were on result screen
+      if (wasOnResultScreen) {
+        onResultScreenLeave?.()
+      }
       onLeave();
     }
   };
@@ -239,7 +265,19 @@ export default function GenericGameBoard({
 
   // Show result screen when game ends
   if (gameRenderer.isGameFinished(gameState)) {
-    return <ResultScreen roomData={roomData} user={user} onBackToLobby={onLeave} />
+    // Ensure roomId is set for ResultScreen
+    const resultRoomData = { ...roomData, roomId }
+    
+    // Create a proper callback that handles result screen state
+    const handleBackToLobbyFromResult = () => {
+      console.log("🎭 User leaving result screen via back to lobby")
+      // Call result screen leave callback to reset state
+      onResultScreenLeave?.()
+      // Then call the main leave function
+      onLeave()
+    }
+    
+    return <ResultScreen roomData={resultRoomData} user={user} onBackToLobby={handleBackToLobbyFromResult} />
   }
 
   return (

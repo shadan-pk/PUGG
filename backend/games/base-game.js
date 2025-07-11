@@ -34,7 +34,46 @@ export class BaseGame {
         break;
       }
     }
-    await redis.del(`user:${userId}:session`);
+    
+    // LESS AGGRESSIVE CLEANUP: Only clean up if user is not on a result screen
+    const cleanupUserSessionKey = `user:${userId}:session`;
+    const cleanupExistingSessionId = await redis.get(cleanupUserSessionKey);
+    if (cleanupExistingSessionId) {
+      // Check if the session is a result screen that should be preserved
+      const gameTypes = ['tictactoe', 'connect-four']; // Add more as needed
+      let shouldCleanup = true;
+      
+      for (const gameType of gameTypes) {
+        const sessionKey = `${gameType}:session:${cleanupExistingSessionId}`;
+        const sessionData = await redis.get(sessionKey);
+        if (sessionData) {
+          const session = JSON.parse(sessionData);
+          // Don't cleanup if session is finished (result screen) and user might still be viewing it
+          if (session.status === 'finished' || session.gameState?.winner) {
+            console.log(`[PRESERVE] User ${userId} is on result screen ${cleanupExistingSessionId}, preserving session`);
+            shouldCleanup = false;
+            break;
+          }
+        }
+      }
+      
+      if (shouldCleanup) {
+        console.log(`[AGGRESSIVE CLEANUP] Found existing session ${cleanupExistingSessionId} for user ${userId}, clearing it`);
+        await redis.del(cleanupUserSessionKey);
+        
+        // Also try to clean up the session data if it exists
+        for (const gameType of gameTypes) {
+          const sessionKey = `${gameType}:session:${cleanupExistingSessionId}`;
+          const sessionExists = await redis.exists(sessionKey);
+          if (sessionExists) {
+            console.log(`[AGGRESSIVE CLEANUP] Found and deleting session ${cleanupExistingSessionId} for game ${gameType}`);
+            await redis.del(sessionKey);
+            break;
+          }
+        }
+      }
+    }
+    
     console.log(`[HARD RESET] Deleted user-to-session mapping for user:${userId}:session`);
 
     // Defensive: Check if user is already in a session, and if the session actually exists and is valid

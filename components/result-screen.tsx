@@ -41,7 +41,7 @@ interface ResultScreenProps {
 
 export default function ResultScreen({ roomData, user, onBackToLobby }: ResultScreenProps) {
   const [isCleaningUp, setIsCleaningUp] = useState(false)
-  const [timeLeft, setTimeLeft] = useState(60) // 60 seconds countdown
+  const [timeLeft, setTimeLeft] = useState(5) // 5 seconds countdown
   const { gameState, players, roomId } = roomData
 
   const playerXName = players[gameState.playerX]?.name || "Player X"
@@ -54,8 +54,7 @@ export default function ResultScreen({ roomData, user, onBackToLobby }: ResultSc
     const timer = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
-          // Auto-leave when timer reaches 0
-          handleBackToLobby()
+          // Timer finished, but don't auto-leave - let user click button
           return 0
         }
         return prev - 1
@@ -94,8 +93,12 @@ export default function ResultScreen({ roomData, user, onBackToLobby }: ResultSc
     
     setIsCleaningUp(true)
     try {
-      // Call leave-result endpoint instead of cleanup
-      const response = await fetch(`http://localhost:3001/game/tictactoe/${roomId}/leave-result`, {
+      // Extract game type from room ID (format: gameType-timestamp-random)
+      const parts = roomId.split('-');
+      const gameType = parts.slice(0, -2).join('-');
+      
+      // Call leave-result endpoint using generic game type
+      const response = await fetch(`http://localhost:3001/game/${gameType}/${roomId}/leave-result`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId: user.uid }),
@@ -162,7 +165,10 @@ export default function ResultScreen({ roomData, user, onBackToLobby }: ResultSc
           <div className="mt-4 flex items-center justify-center space-x-2 text-slate-300">
             <Clock className="w-4 h-4" />
             <span className="text-sm">
-              Auto-return to lobby in {formatTime(timeLeft)}
+              {timeLeft > 0 
+                ? `Auto-return to lobby in ${formatTime(timeLeft)}`
+                : "Click 'Back to Lobby' to continue"
+              }
             </span>
           </div>
         </CardHeader>
@@ -218,7 +224,7 @@ export default function ResultScreen({ roomData, user, onBackToLobby }: ResultSc
             className="w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-semibold py-3"
           >
             <Home className="w-4 h-4 mr-2" />
-            {isCleaningUp ? "Leaving..." : "Back to Lobby"}
+            {isCleaningUp ? "Leaving..." : timeLeft > 0 ? "Back to Lobby" : "Back to Lobby (Ready)"}
           </Button>
         </CardContent>
       </Card>
