@@ -1,138 +1,190 @@
 // backend/games/tictactoe.js
-import { createClient } from 'redis';
+import { BaseGame } from './base-game.js';
 
-const redis = createClient({ url: 'redis://localhost:6379' }); // adjust if your Docker uses a different host/port
-redis.connect().catch(console.error);
-  
-export async function handleMatchmaking(userId, username) {
-  const queueKey = 'tictactoe:queue';
-  const sessionPrefix = 'tictactoe:session:';
-
-  // HARD RESET: Remove user from queue if present and delete their session mapping
-  const queue = await redis.lRange(queueKey, 0, -1);
-  for (let i = 0; i < queue.length; i++) {
-    const player = JSON.parse(queue[i]);
-    if (player.userId === userId) {
-      await redis.lRem(queueKey, 1, queue[i]);
-      console.log(`[HARD RESET] Removed ${userId} from queue`);
-      break;
-    }
+export class TicTacToeGame extends BaseGame {
+  constructor() {
+    super('tictactoe');
   }
-  await redis.del(`user:${userId}:session`);
-  console.log(`[HARD RESET] Deleted user-to-session mapping for user:${userId}:session`);
 
-  // Defensive: Check if user is already in a session, and if the session actually exists and is valid
-  const userSessionKey = `user:${userId}:session`;
-  const existingSessionId = await redis.get(userSessionKey);
-  if (existingSessionId) {
-    const sessionExists = await redis.exists(`${sessionPrefix}${existingSessionId}`);
-    if (sessionExists) {
-      // Check if the session is still valid (not finished/cleaned up)
-      const sessionData = await redis.get(`${sessionPrefix}${existingSessionId}`);
-      if (sessionData) {
-        const session = JSON.parse(sessionData);
-        // Only return existing session if it's active (not finished)
-        if (session.status === 'active' && !session.gameState?.winner) {
-          console.log(`User ${userId} already in active session ${existingSessionId}`);
-          return { matched: true, roomId: existingSessionId };
-        } else {
-          // Session is finished, clean it up
-          console.log(`Cleaning up finished session ${existingSessionId} for user ${userId}`);
-          await redis.del(`${sessionPrefix}${existingSessionId}`);
-          await redis.del(userSessionKey);
-        }
+  // Implement abstract methods
+  async tryMatchPlayers() {
+    const queueLength = await this.getQueueLength();
+    
+    // Only try to match if we have at least 2 players
+    if (queueLength >= 2) {
+      // Try to match two players
+      const players = [];
+      while (players.length < 2) {
+        const playerData = await this.popFromQueue();
+        if (!playerData) break;
+        players.push(JSON.parse(playerData));
+      }
+
+      console.log(`Popped ${players.length} players from queue`);
+
+      if (players.length === 2) {
+        return await this.createMatch(players);
       } else {
-        // Session data is corrupted, clean up
-        await redis.del(userSessionKey);
-        console.log(`Cleaned up corrupted session mapping for user ${userId}`);
-      }
-    } else {
-      // Clean up stale mapping
-      await redis.del(userSessionKey);
-      console.log(`Cleaned up stale session mapping for user ${userId}`);
-    }
-  }
-
-  // Add user to the matchmaking queue
-  await redis.rPush(queueKey, JSON.stringify({ userId, username }));
-  console.log(`Added ${username} (${userId}) to queue`);
-
-  // Check queue length
-  const queueLength = await redis.lLen(queueKey);
-  console.log(`Queue length after adding ${username}: ${queueLength}`);
-
-  // Only try to match if we have at least 2 players
-  if (queueLength >= 2) {
-    // Try to match two players
-    const players = [];
-    while (players.length < 2) {
-      const playerData = await redis.lPop(queueKey);
-      if (!playerData) break;
-      players.push(JSON.parse(playerData));
-    }
-
-    console.log(`Popped ${players.length} players from queue`);
-
-    if (players.length === 2) {
-      // Create a new session
-      const roomId = `${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-      const sessionKey = sessionPrefix + roomId;
-
-      console.log(`Creating match: ${players[0].username} vs ${players[1].username} in room ${roomId}`);
-
-      // Store session data in Redis
-      const sessionData = {
-        roomId,
-        players: {
-          [players[0].userId]: { name: players[0].username },
-          [players[1].userId]: { name: players[1].username }
-        },
-        createdAt: Date.now(),
-        status: 'active',
-        gameState: {
-          board: Array(9).fill(null),
-          currentPlayer: 'X',
-          winner: null,
-          playerX: players[0].userId,
-          playerO: players[1].userId,
-          moves: 0
+        // Put players back in queue if we couldn't match
+        for (const player of players) {
+          await this.addToQueue(player);
         }
-      };
-      await redis.set(sessionKey, JSON.stringify(sessionData));
-
-      // Map users to session for quick lookup
-      await redis.set(`user:${players[0].userId}:session`, roomId);
-      await redis.set(`user:${players[1].userId}:session`, roomId);
-
-      console.log(`Match created successfully for room ${roomId}`);
-      return { matched: true, roomId };
-    } else {
-      // Put players back in queue if we couldn't match
-      for (const player of players) {
-        await redis.rPush(queueKey, JSON.stringify(player));
+        console.log(`Put ${players.length} players back in queue`);
       }
-      console.log(`Put ${players.length} players back in queue`);
     }
+
+    // Not enough players yet
+    console.log(`Not enough players, waiting...`);
+    return { matched: false };
   }
 
-  // Not enough players yet
-  console.log(`Not enough players for ${username}, waiting...`);
-  return { matched: false };
+  createInitialGameState(players) {
+    return {
+      board: Array(9).fill(null),
+      currentPlayer: 'X',
+      winner: null,
+      playerX: players[0].userId,
+      playerO: players[1].userId,
+      moves: 0
+    };
+  }
+
+  validateMove(gameState, userId, moveData) {
+    const { index } = moveData;
+    
+    // Check if cell is already occupied
+    if (gameState.board[index] !== null) {
+      return { valid: false, error: "Cell already occupied" };
+    }
+    
+    // Check if game is already finished
+    if (gameState.winner) {
+      return { valid: false, error: "Game already finished" };
+    }
+    
+    // Check if it's the player's turn
+    const isPlayerX = gameState.playerX === userId;
+    const isPlayerO = gameState.playerO === userId;
+    const isCurrentPlayer = 
+      (gameState.currentPlayer === "X" && isPlayerX) ||
+      (gameState.currentPlayer === "O" && isPlayerO);
+    
+    if (!isCurrentPlayer) {
+      return { valid: false, error: "Not your turn" };
+    }
+    
+    return { valid: true };
+  }
+
+  makeMove(gameState, userId, moveData) {
+    const { index } = moveData;
+    
+    // Make the move
+    const newBoard = [...gameState.board];
+    newBoard[index] = gameState.currentPlayer;
+    
+    // Check for winner
+    const winner = this.checkWinner(newBoard);
+    const isDraw = !winner && newBoard.every((cell) => cell !== null);
+    
+    // Update game state
+    const newGameState = {
+      ...gameState,
+      board: newBoard,
+      currentPlayer: gameState.currentPlayer === "X" ? "O" : "X",
+      winner: winner || (isDraw ? "draw" : null),
+      moves: gameState.moves + 1,
+    };
+    
+    return newGameState;
+  }
+
+  checkGameEnd(gameState) {
+    if (gameState.winner) {
+      return {
+        finished: true,
+        winner: gameState.winner,
+        isDraw: gameState.winner === "draw"
+      };
+    }
+    return { finished: false };
+  }
+
+  checkWinner(board) {
+    const lines = [
+      [0, 1, 2], [3, 4, 5], [6, 7, 8], // rows
+      [0, 3, 6], [1, 4, 7], [2, 5, 8], // columns
+      [0, 4, 8], [2, 4, 6] // diagonals
+    ];
+    
+    for (const [a, b, c] of lines) {
+      if (board[a] && board[a] === board[b] && board[a] === board[c]) {
+        return board[a];
+      }
+    }
+    return null;
+  }
+
+  getGameDisplayName() {
+    return "Tic Tac Toe";
+  }
+
+  getMinPlayers() {
+    return 2;
+  }
+
+  getMaxPlayers() {
+    return 2;
+  }
+
+  // Helper methods
+  async getQueueLength() {
+    const redis = await this.getRedis();
+    return await redis.lLen(this.queueKey);
+  }
+
+  async popFromQueue() {
+    const redis = await this.getRedis();
+    return await redis.lPop(this.queueKey);
+  }
+
+  async addToQueue(player) {
+    const redis = await this.getRedis();
+    return await redis.rPush(this.queueKey, JSON.stringify(player));
+  }
+
+  async createMatch(players) {
+    const roomId = `${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    
+    console.log(`Creating match: ${players[0].username} vs ${players[1].username} in room ${roomId}`);
+
+    // Create session data
+    const sessionData = {
+      roomId,
+      players: {
+        [players[0].userId]: { name: players[0].username },
+        [players[1].userId]: { name: players[1].username }
+      },
+      createdAt: Date.now(),
+      status: 'active',
+      gameState: this.createInitialGameState(players)
+    };
+
+    // Store session
+    await this.updateSession(roomId, sessionData);
+
+    // Map users to session
+    await this.setUserSession(players[0].userId, roomId);
+    await this.setUserSession(players[1].userId, roomId);
+
+    console.log(`Match created successfully for room ${roomId}`);
+    return { matched: true, roomId };
+  }
 }
 
-export async function cancelMatchmaking(userId) {
-  const queueKey = 'tictactoe:queue';
-  // Remove user from queue (inefficient for large queues, but fine for small games)
-  const queue = await redis.lRange(queueKey, 0, -1);
-  for (let i = 0; i < queue.length; i++) {
-    const player = JSON.parse(queue[i]);
-    if (player.userId === userId) {
-      await redis.lRem(queueKey, 1, queue[i]);
-      console.log(`Removed ${player.username} from queue`);
-      break;
-    }
-  }
-  // Optionally, remove session mapping if exists
-  await redis.del(`user:${userId}:session`);
-  console.log(`Deleted user-to-session mapping for user:${userId}:session`);
-}
+// Create and export a singleton instance
+const ticTacToeGame = new TicTacToeGame();
+
+// Export the functions for backward compatibility
+export const handleMatchmaking = (userId, username) => ticTacToeGame.handleMatchmaking(userId, username);
+export const cancelMatchmaking = (userId) => ticTacToeGame.cancelMatchmaking(userId);
