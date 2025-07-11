@@ -1,10 +1,10 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Trophy, Users, Home } from "lucide-react"
+import { Trophy, Users, Home, Clock } from "lucide-react"
 
 interface GameState {
   board: (string | null)[]
@@ -30,6 +30,7 @@ interface RoomData {
   gameState: GameState
   players: { [key: string]: Player }
   status: string
+  roomId: string
 }
 
 interface ResultScreenProps {
@@ -40,12 +41,29 @@ interface ResultScreenProps {
 
 export default function ResultScreen({ roomData, user, onBackToLobby }: ResultScreenProps) {
   const [isCleaningUp, setIsCleaningUp] = useState(false)
-  const { gameState, players } = roomData
+  const [timeLeft, setTimeLeft] = useState(60) // 60 seconds countdown
+  const { gameState, players, roomId } = roomData
 
   const playerXName = players[gameState.playerX]?.name || "Player X"
   const playerOName = players[gameState.playerO!]?.name || "Player O"
   const isPlayerX = gameState.playerX === user.uid
   const isPlayerO = gameState.playerO === user.uid
+
+  // Countdown timer effect
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTimeLeft((prev) => {
+        if (prev <= 1) {
+          // Auto-leave when timer reaches 0
+          handleBackToLobby()
+          return 0
+        }
+        return prev - 1
+      })
+    }, 1000)
+
+    return () => clearInterval(timer)
+  }, [])
 
   const getResultMessage = () => {
     if (gameState.winner === "draw") {
@@ -72,19 +90,34 @@ export default function ResultScreen({ roomData, user, onBackToLobby }: ResultSc
   }
 
   const handleBackToLobby = async () => {
+    if (isCleaningUp) return // Prevent multiple calls
+    
     setIsCleaningUp(true)
     try {
-      // Call cleanup endpoint to delete the session
-      await fetch(`http://localhost:3001/game/tictactoe/${roomData.roomId}/cleanup`, {
+      // Call leave-result endpoint instead of cleanup
+      const response = await fetch(`http://localhost:3001/game/tictactoe/${roomId}/leave-result`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: user.uid }),
       })
+      
+      if (!response.ok) {
+        // If room is already deleted or not found, just go back to lobby
+        console.log("Room already cleaned up or not found")
+      }
     } catch (error) {
-      console.error("Error cleaning up session:", error)
+      console.error("Error leaving result screen:", error)
+      // Even if there's an error, we should still go back to lobby
     } finally {
       setIsCleaningUp(false)
       onBackToLobby()
     }
+  }
+
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
   return (
@@ -121,6 +154,14 @@ export default function ResultScreen({ roomData, user, onBackToLobby }: ResultSc
           >
             {getPlayerResult()}
           </Badge>
+          
+          {/* Countdown Timer */}
+          <div className="mt-4 flex items-center justify-center space-x-2 text-slate-300">
+            <Clock className="w-4 h-4" />
+            <span className="text-sm">
+              Auto-return to lobby in {formatTime(timeLeft)}
+            </span>
+          </div>
         </CardHeader>
         <CardContent className="space-y-4">
           {/* Players */}
@@ -174,7 +215,7 @@ export default function ResultScreen({ roomData, user, onBackToLobby }: ResultSc
             className="w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-semibold py-3"
           >
             <Home className="w-4 h-4 mr-2" />
-            {isCleaningUp ? "Cleaning up..." : "Back to Lobby"}
+            {isCleaningUp ? "Leaving..." : "Back to Lobby"}
           </Button>
         </CardContent>
       </Card>
