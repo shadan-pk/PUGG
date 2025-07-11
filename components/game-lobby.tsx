@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { signOut } from "firebase/auth"
 import { auth } from "@/lib/firebase"
 import { Button } from "@/components/ui/button"
@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { useToast } from "@/hooks/use-toast"
 import GameBoard from "@/components/game-board"
-import { MatchmakingService } from "@/lib/matchmaking"
+import { matchmakingService } from "@/lib/matchmaking" // Use singleton instance
 import { PresenceService, type UserPresence } from "@/lib/presence"
 import { Users, Trophy, LogOut, Target, Crown, Zap, Clock, Star, X, Search } from "lucide-react"
 
@@ -74,11 +74,28 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
   const [matchmaking, setMatchmaking] = useState(false)
   const [currentMatch, setCurrentMatch] = useState<string | null>(null)
   const [onlineUsers, setOnlineUsers] = useState<UserPresence[]>([])
-  const [matchmakingService] = useState(() => new MatchmakingService())
   const [presenceService] = useState(() => new PresenceService(userProfile.uid, userProfile.username))
-  const [matchmakingId, setMatchmakingId] = useState<string | null>(null)
   const [matchmakingUnsubscribe, setMatchmakingUnsubscribe] = useState<(() => void) | null>(null)
   const { toast } = useToast()
+
+  // Handle match found callback
+  const handleMatchFound = useCallback((roomId: string) => {
+    console.log(`🎉 Match found! Room ID: ${roomId}`)
+    setCurrentMatch(roomId)
+    setMatchmaking(false)
+    presenceService.updateStatus("in-game", roomId)
+    
+    // Clean up matchmaking listener
+    if (matchmakingUnsubscribe) {
+      matchmakingUnsubscribe()
+      setMatchmakingUnsubscribe(null)
+    }
+    
+    toast({
+      title: "🎉 Match Found!",
+      description: "Opponent found! Starting game...",
+    })
+  }, [presenceService, matchmakingUnsubscribe, toast])
 
   useEffect(() => {
     // Set user online when component mounts
@@ -91,55 +108,58 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
     return () => {
       presenceService.goOffline()
       unsubscribePresence()
+      
+      // Clean up matchmaking
       if (matchmakingUnsubscribe) {
         matchmakingUnsubscribe()
+      }
+      
+      // Clean up matchmaking service
+      if (matchmakingService && typeof matchmakingService.cleanup === 'function') {
+        matchmakingService.cleanup()
       }
     }
   }, [presenceService, matchmakingUnsubscribe])
 
   const handleStartMatch = async () => {
+    // Prevent multiple matchmaking attempts
+    if (matchmaking || matchmakingService.isMatchmakingInProgress(userProfile.uid)) {
+      console.log("⚠️ Matchmaking already in progress")
+      return
+    }
+
     setMatchmaking(true)
 
     try {
       console.log("🎮 Starting matchmaking for:", selectedMode)
 
+      // Start listening for match updates first
+      const unsubscribe = matchmakingService.listenForMatch(userProfile.uid, handleMatchFound)
+      setMatchmakingUnsubscribe(() => unsubscribe)
+
+      // Then call the matchmaking API
       const result = await matchmakingService.joinMatchmaking(userProfile.uid, userProfile.username, selectedMode)
 
       if (result.matched && result.roomId) {
-        // Immediate match
-        setCurrentMatch(result.roomId)
-        await presenceService.updateStatus("in-game", result.roomId)
-        setMatchmaking(false)
-        toast({
-          title: "🎉 Match Found!",
-          description: "Opponent found! Starting game...",
-        })
+        // Immediate match found
+        handleMatchFound(result.roomId)
       } else {
         // Waiting for opponent
-        setMatchmakingId(userProfile.uid)
         toast({
           title: "🔍 Searching for Opponent",
           description: `Looking for players in ${GAME_MODES.find((m) => m.id === selectedMode)?.name}...`,
         })
-        // Listen for match
-        const unsubscribe = matchmakingService.listenForMatch(userProfile.uid, (roomId) => {
-          setCurrentMatch(roomId)
-          setMatchmaking(false)
-          setMatchmakingId(null)
-          presenceService.updateStatus("in-game", roomId)
-          toast({
-            title: "🎉 Match Found!",
-            description: "Opponent found! Starting game...",
-          })
-          unsubscribe()
-          setMatchmakingUnsubscribe(null)
-        })
-        setMatchmakingUnsubscribe(() => unsubscribe)
+        // Keep matchmaking state true and listener active
       }
     } catch (error: any) {
       console.error("❌ Matchmaking error:", error)
       setMatchmaking(false)
-      setMatchmakingId(null)
+      
+      // Clean up listener on error
+      if (matchmakingUnsubscribe) {
+        matchmakingUnsubscribe()
+        setMatchmakingUnsubscribe(null)
+      }
 
       toast({
         title: "Matchmaking Failed",
@@ -150,22 +170,31 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
   }
 
   const handleCancelMatchmaking = async () => {
-    if (matchmakingId) {
-      await matchmakingService.cancelMatchmaking(matchmakingId)
-      setMatchmakingId(null)
+    try {
+      // Cancel matchmaking on backend
+      await matchmakingService.cancelMatchmaking(userProfile.uid)
+      
+      // Clean up listener
+      if (matchmakingUnsubscribe) {
+        matchmakingUnsubscribe()
+        setMatchmakingUnsubscribe(null)
+      }
+
+      setMatchmaking(false)
+
+      toast({
+        title: "❌ Matchmaking Cancelled",
+        description: "You can start a new search anytime.",
+      })
+    } catch (error) {
+      console.error("❌ Error cancelling matchmaking:", error)
+      // Still update UI state even if backend call fails
+      setMatchmaking(false)
+      if (matchmakingUnsubscribe) {
+        matchmakingUnsubscribe()
+        setMatchmakingUnsubscribe(null)
+      }
     }
-
-    if (matchmakingUnsubscribe) {
-      matchmakingUnsubscribe()
-      setMatchmakingUnsubscribe(null)
-    }
-
-    setMatchmaking(false)
-
-    toast({
-      title: "❌ Matchmaking Cancelled",
-      description: "You can start a new search anytime.",
-    })
   }
 
   const handleLeaveGame = async () => {
@@ -181,14 +210,19 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
   const handleLogout = async () => {
     try {
       // Cancel any active matchmaking
-      if (matchmakingId) {
-        await matchmakingService.cancelMatchmaking(matchmakingId)
+      if (matchmaking) {
+        await matchmakingService.cancelMatchmaking(userProfile.uid)
       }
 
+      // Clean up listener
       if (matchmakingUnsubscribe) {
         matchmakingUnsubscribe()
       }
 
+      // Clean up services
+      if (matchmakingService && typeof matchmakingService.cleanup === 'function') {
+        matchmakingService.cleanup()
+      }
       await presenceService.goOffline()
       await signOut(auth)
 
@@ -206,33 +240,38 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-blue-950 to-slate-900">
       {/* Header */}
-      <div className="bg-black/20 backdrop-blur-sm border-b border-gray-700">
-        <div className="max-w-7xl mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-4">
-              <div className="p-2 bg-gradient-to-br from-orange-500 to-red-600 rounded-lg">
-                <Target className="h-8 w-8 text-white" />
+      <div className="border-b border-slate-800 bg-slate-950/50 backdrop-blur supports-[backdrop-filter]:bg-slate-950/50">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex justify-between items-center py-4">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center">
+                <Crown className="w-6 h-6 text-white" />
               </div>
               <div>
-                <h1 className="text-2xl font-bold text-white">MINI ARENA</h1>
-                <p className="text-gray-300 text-sm">Battle Royale Mini Games</p>
+                <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+                  Game Arena
+                </h1>
+                <p className="text-slate-400 text-sm">Choose your battle</p>
               </div>
             </div>
-
+            
             <div className="flex items-center space-x-4">
-              <Badge variant="secondary" className="bg-green-500/20 text-green-300 border-green-500/30">
-                <Users className="h-3 w-3 mr-1" />
-                {onlineUsers.length} Online
-              </Badge>
+              <div className="flex items-center space-x-2 bg-slate-800/50 rounded-lg px-3 py-2">
+                <Users className="w-4 h-4 text-green-400" />
+                <span className="text-sm font-medium text-slate-300">
+                  {onlineUsers.length} online
+                </span>
+              </div>
+              
               <Button
                 onClick={handleLogout}
-                variant="outline"
+                variant="ghost"
                 size="sm"
-                className="bg-transparent border-gray-600 text-gray-300 hover:bg-gray-700"
+                className="text-slate-400 hover:text-white hover:bg-slate-800"
               >
-                <LogOut className="h-4 w-4 mr-2" />
+                <LogOut className="w-4 h-4 mr-2" />
                 Logout
               </Button>
             </div>
@@ -240,253 +279,164 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
         </div>
       </div>
 
-      <div className="max-w-7xl mx-auto p-4">
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          {/* Left Sidebar - Player Info & Controls */}
-          <div className="lg:col-span-1 space-y-6">
-            {/* Player Profile */}
-            <Card className="bg-black/40 backdrop-blur-lg border-gray-700">
-              <CardContent className="p-6">
-                <div className="flex items-center space-x-4 mb-4">
-                  <img
-                    src={userProfile.photoURL || "/placeholder.svg?height=60&width=60"}
-                    alt="Profile"
-                    className="w-15 h-15 rounded-full border-2 border-orange-500"
-                  />
+      {/* Main Content */}
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          {/* Game Selection */}
+          <div className="lg:col-span-2">
+            <Card className="bg-slate-900/50 border-slate-800 backdrop-blur">
+              <CardHeader>
+                <CardTitle className="text-xl text-slate-100 flex items-center gap-2">
+                  <Target className="w-5 h-5" />
+                  Choose Your Game
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {GAME_MODES.map((mode) => (
+                  <div
+                    key={mode.id}
+                    className={`p-4 rounded-lg border-2 cursor-pointer transition-all duration-200 ${
+                      selectedMode === mode.id
+                        ? "border-blue-500 bg-blue-500/10"
+                        : mode.available
+                        ? "border-slate-700 bg-slate-800/30 hover:border-slate-600"
+                        : "border-slate-800 bg-slate-900/50 opacity-50 cursor-not-allowed"
+                    }`}
+                    onClick={() => mode.available && setSelectedMode(mode.id)}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-3">
+                        <div className="text-2xl">{mode.icon}</div>
+                        <div>
+                          <h3 className="font-semibold text-slate-100">{mode.name}</h3>
+                          <p className="text-sm text-slate-400">{mode.description}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <Badge variant="secondary" className="text-xs">
+                          {mode.players}
+                        </Badge>
+                        <Badge variant="outline" className="text-xs">
+                          {mode.duration}
+                        </Badge>
+                        {!mode.available && (
+                          <Badge variant="destructive" className="text-xs">
+                            Coming Soon
+                          </Badge>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Player Info & Controls */}
+          <div className="space-y-6">
+            {/* Player Card */}
+            <Card className="bg-slate-900/50 border-slate-800 backdrop-blur">
+              <CardHeader>
+                <CardTitle className="text-lg text-slate-100 flex items-center gap-2">
+                  <Crown className="w-5 h-5" />
+                  Player Stats
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center space-x-3 mb-4">
+                  <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center">
+                    <span className="text-white font-bold text-lg">
+                      {userProfile.username.charAt(0).toUpperCase()}
+                    </span>
+                  </div>
                   <div>
-                    <h3 className="text-lg font-bold text-white">{userProfile.username}</h3>
-                    <p className="text-gray-300 text-sm">{userProfile.displayName}</p>
-                    <Badge variant="secondary" className="bg-orange-500/20 text-orange-300 border-orange-500/30 mt-1">
-                      <Crown className="h-3 w-3 mr-1" />
-                      {userProfile.stats.rank}
-                    </Badge>
+                    <h3 className="font-semibold text-slate-100">{userProfile.username}</h3>
+                    <p className="text-sm text-slate-400">Level {userProfile.stats.level}</p>
                   </div>
                 </div>
-
-                <div className="space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span className="text-gray-400">Level</span>
-                    <span className="text-white font-medium">{userProfile.stats.level}</span>
+                
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <div className="text-slate-400">Games Played</div>
+                    <div className="text-slate-100 font-semibold">{userProfile.stats.gamesPlayed}</div>
                   </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-gray-400">XP</span>
-                    <span className="text-white font-medium">{userProfile.stats.xp}</span>
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <div className="text-slate-400">Win Rate</div>
+                    <div className="text-slate-100 font-semibold">{userProfile.stats.winRate}%</div>
                   </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-gray-400">Win Rate</span>
-                    <span className="text-white font-medium">{userProfile.stats.winRate}%</span>
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <div className="text-slate-400">Rank</div>
+                    <div className="text-slate-100 font-semibold">{userProfile.stats.rank}</div>
+                  </div>
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <div className="text-slate-400">XP</div>
+                    <div className="text-slate-100 font-semibold">{userProfile.stats.xp}</div>
                   </div>
                 </div>
               </CardContent>
             </Card>
 
-            {/* Online Players */}
-            <Card className="bg-black/40 backdrop-blur-lg border-gray-700">
+            {/* Matchmaking Controls */}
+            <Card className="bg-slate-900/50 border-slate-800 backdrop-blur">
               <CardHeader>
-                <CardTitle className="text-white flex items-center">
-                  <Users className="h-5 w-5 mr-2 text-green-400" />
-                  Online Players ({onlineUsers.length})
+                <CardTitle className="text-lg text-slate-100 flex items-center gap-2">
+                  <Zap className="w-5 h-5" />
+                  Quick Match
                 </CardTitle>
               </CardHeader>
-              <CardContent className="space-y-2 max-h-48 overflow-y-auto">
-                {onlineUsers.map((user) => (
-                  <div key={user.userId} className="flex items-center justify-between p-2 bg-gray-800/50 rounded">
-                    <span className="text-white text-sm">{user.username}</span>
-                    <Badge
-                      variant="secondary"
-                      className={
-                        user.status === "online" ? "bg-green-500/20 text-green-300" : "bg-blue-500/20 text-blue-300"
-                      }
+              <CardContent>
+                {!matchmaking ? (
+                  <Button
+                    onClick={handleStartMatch}
+                    className="w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-semibold py-3"
+                    disabled={!GAME_MODES.find(m => m.id === selectedMode)?.available}
+                  >
+                    <Search className="w-4 h-4 mr-2" />
+                    Find Match
+                  </Button>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-center space-x-2 text-slate-300">
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-400"></div>
+                      <span>Searching for opponent...</span>
+                    </div>
+                    <Button
+                      onClick={handleCancelMatchmaking}
+                      variant="outline"
+                      className="w-full border-slate-600 text-slate-300 hover:bg-slate-800"
                     >
-                      {user.status === "online" ? "🟢" : "🎮"}
-                    </Badge>
+                      <X className="w-4 h-4 mr-2" />
+                      Cancel Search
+                    </Button>
                   </div>
-                ))}
-                {onlineUsers.length === 0 && (
-                  <p className="text-gray-400 text-sm text-center py-4">No other players online</p>
                 )}
               </CardContent>
             </Card>
 
-            {/* Game Mode Selection */}
-            <Card className="bg-black/40 backdrop-blur-lg border-gray-700">
+            {/* Online Players */}
+            <Card className="bg-slate-900/50 border-slate-800 backdrop-blur">
               <CardHeader>
-                <CardTitle className="text-white flex items-center">
-                  <Target className="h-5 w-5 mr-2 text-orange-400" />
-                  Game Modes
+                <CardTitle className="text-lg text-slate-100 flex items-center gap-2">
+                  <Users className="w-5 h-5" />
+                  Online Players
                 </CardTitle>
               </CardHeader>
-              <CardContent className="space-y-3">
-                {GAME_MODES.map((mode) => (
-                  <div
-                    key={mode.id}
-                    onClick={() => mode.available && setSelectedMode(mode.id)}
-                    className={`p-3 rounded-lg border cursor-pointer transition-all ${
-                      selectedMode === mode.id
-                        ? "border-orange-500 bg-orange-500/10"
-                        : mode.available
-                          ? "border-gray-600 bg-gray-800/50 hover:border-gray-500"
-                          : "border-gray-700 bg-gray-800/20 opacity-50 cursor-not-allowed"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-2">
+              <CardContent>
+                <div className="space-y-2 max-h-40 overflow-y-auto">
+                  {onlineUsers.map((user) => (
+                    <div
+                      key={user.userId}
+                      className="flex items-center justify-between py-2 px-3 bg-slate-800/30 rounded-lg"
+                    >
                       <div className="flex items-center space-x-2">
-                        <span className="text-lg">{mode.icon}</span>
-                        <span className="text-white font-medium">{mode.name}</span>
+                        <div className="w-2 h-2 bg-green-400 rounded-full"></div>
+                        <span className="text-sm text-slate-300">{user.username}</span>
                       </div>
-                      {!mode.available && (
-                        <Badge variant="secondary" className="bg-gray-600 text-gray-300 text-xs">
-                          Soon
-                        </Badge>
-                      )}
+                      <Badge variant="outline" className="text-xs">
+                        {user.status}
+                      </Badge>
                     </div>
-                    <p className="text-gray-400 text-xs mb-2">{mode.description}</p>
-                    <div className="flex justify-between text-xs text-gray-500">
-                      <span>{mode.players}</span>
-                      <span>{mode.duration}</span>
-                      <span>{mode.difficulty}</span>
-                    </div>
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
-
-            {/* Start Match Button */}
-            {!matchmaking ? (
-              <Button
-                onClick={handleStartMatch}
-                disabled={!GAME_MODES.find((m) => m.id === selectedMode)?.available}
-                className="w-full h-14 text-lg font-bold bg-gradient-to-r from-orange-500 to-red-600 hover:from-orange-600 hover:to-red-700 text-white border-0"
-              >
-                <div className="flex items-center space-x-2">
-                  <Search className="h-5 w-5" />
-                  <span>FIND MATCH</span>
-                </div>
-              </Button>
-            ) : (
-              <div className="space-y-3">
-                <Button
-                  disabled
-                  className="w-full h-14 text-lg font-bold bg-gradient-to-r from-blue-500 to-purple-600 text-white border-0"
-                >
-                  <div className="flex items-center space-x-2">
-                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
-                    <span>Finding Match...</span>
-                  </div>
-                </Button>
-                <Button
-                  onClick={handleCancelMatchmaking}
-                  variant="outline"
-                  className="w-full bg-transparent border-gray-600 text-gray-300 hover:bg-gray-700"
-                >
-                  <X className="h-4 w-4 mr-2" />
-                  Cancel Search
-                </Button>
-              </div>
-            )}
-          </div>
-
-          {/* Main Content Area */}
-          <div className="lg:col-span-3 space-y-6">
-            {/* Stats Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <Card className="bg-black/40 backdrop-blur-lg border-gray-700">
-                <CardContent className="p-4">
-                  <div className="flex items-center space-x-3">
-                    <Trophy className="h-8 w-8 text-yellow-400" />
-                    <div>
-                      <p className="text-2xl font-bold text-white">{userProfile.stats.gamesWon}</p>
-                      <p className="text-gray-400 text-sm">Wins</p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card className="bg-black/40 backdrop-blur-lg border-gray-700">
-                <CardContent className="p-4">
-                  <div className="flex items-center space-x-3">
-                    <Zap className="h-8 w-8 text-blue-400" />
-                    <div>
-                      <p className="text-2xl font-bold text-white">{userProfile.stats.gamesPlayed}</p>
-                      <p className="text-gray-400 text-sm">Games Played</p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card className="bg-black/40 backdrop-blur-lg border-gray-700">
-                <CardContent className="p-4">
-                  <div className="flex items-center space-x-3">
-                    <Star className="h-8 w-8 text-purple-400" />
-                    <div>
-                      <p className="text-2xl font-bold text-white">{userProfile.stats.xp}</p>
-                      <p className="text-gray-400 text-sm">Experience</p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-
-            {/* Featured Content */}
-            <Card className="bg-black/40 backdrop-blur-lg border-gray-700">
-              <CardHeader>
-                <CardTitle className="text-white">🎮 Matchmaking Center</CardTitle>
-              </CardHeader>
-              <CardContent className="p-6">
-                <div className="text-center space-y-4">
-                  <div className="text-6xl mb-4">🎯</div>
-                  <h3 className="text-2xl font-bold text-white">Ready for Battle?</h3>
-                  <p className="text-gray-300 max-w-md mx-auto">
-                    Advanced matchmaking system will pair you with opponents of similar skill level. Find your match and
-                    climb the ranks!
-                  </p>
-
-                  {/* Matchmaking Status */}
-                  {matchmaking && (
-                    <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-4 mt-6">
-                      <div className="flex items-center justify-center space-x-2">
-                        <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-400"></div>
-                        <span className="text-blue-300 font-medium">Searching for opponent...</span>
-                      </div>
-                      <p className="text-blue-200 text-sm mt-2">
-                        Game mode: {GAME_MODES.find((m) => m.id === selectedMode)?.name}
-                      </p>
-                      <p className="text-blue-200 text-xs mt-1">
-                        {onlineUsers.filter((u) => u.status === "online").length} players available
-                      </p>
-                    </div>
-                  )}
-
-                  {/* Success Message */}
-                  {!matchmaking && (
-                    <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-4 mt-6">
-                      <div className="flex items-center justify-center space-x-2">
-                        <span className="text-green-300 font-medium">✅ Matchmaking System Active</span>
-                      </div>
-                      <p className="text-green-200 text-sm mt-2">
-                        Firestore index is working! Advanced matchmaking enabled.
-                      </p>
-                    </div>
-                  )}
-
-                  {/* Coming Soon Features */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-8">
-                    <div className="p-4 bg-gray-800/50 rounded-lg border border-gray-700">
-                      <Clock className="h-6 w-6 text-gray-400 mx-auto mb-2" />
-                      <p className="text-sm text-gray-300 font-medium">Ranked Matches</p>
-                      <p className="text-xs text-gray-500">Skill-based matching</p>
-                    </div>
-                    <div className="p-4 bg-gray-800/50 rounded-lg border border-gray-700">
-                      <Trophy className="h-6 w-6 text-gray-400 mx-auto mb-2" />
-                      <p className="text-sm text-gray-300 font-medium">Leaderboards</p>
-                      <p className="text-xs text-gray-500">Global rankings</p>
-                    </div>
-                    <div className="p-4 bg-gray-800/50 rounded-lg border border-gray-700">
-                      <Users className="h-6 w-6 text-gray-400 mx-auto mb-2" />
-                      <p className="text-sm text-gray-300 font-medium">Tournaments</p>
-                      <p className="text-xs text-gray-500">Competitive events</p>
-                    </div>
-                  </div>
+                  ))}
                 </div>
               </CardContent>
             </Card>

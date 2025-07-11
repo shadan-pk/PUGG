@@ -297,8 +297,30 @@ export default function GameBoard({
   }
 
   const { gameState, players } = roomData
-  const playerXName = players[gameState.playerX]?.name || "Player X"
-  const playerOName = gameState.playerO ? players[gameState.playerO]?.name || "Player O" : "Waiting..."
+  if (!gameState) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600 dark:text-gray-400">Loading game from Firestore...</p>
+          <p className="text-sm text-gray-500 mt-2">Room ID: {roomId.slice(-6)}</p>
+          <Button onClick={onLeave} variant="outline" size="sm" className="mt-4 bg-transparent">
+            Cancel
+          </Button>
+        </div>
+      </div>
+    )
+  }
+  const playerXName =
+    gameState.playerX && players?.[gameState.playerX]?.name
+      ? players[gameState.playerX].name
+      : "Player X"
+  const playerOName =
+    gameState.playerO && players?.[gameState.playerO]?.name
+      ? players[gameState.playerO].name
+      : gameState.playerO
+        ? "Player O"
+        : "Waiting..."
   const isPlayerX = gameState.playerX === user.uid
   const isPlayerO = gameState.playerO === user.uid
   const currentPlayerName = gameState.currentPlayer === "X" ? playerXName : playerOName
