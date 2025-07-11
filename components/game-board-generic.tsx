@@ -11,6 +11,10 @@ import ResultScreen from "./result-screen"
 
 interface GameState {
   [key: string]: any
+  board?: any
+  currentPlayer?: any
+  winner?: any
+  finished?: boolean
 }
 
 interface Player {
@@ -25,17 +29,17 @@ interface MockUser {
 }
 
 interface RoomData {
-  gameState: GameState
+  gameState: any
   players: { [key: string]: Player }
   status: string
   roomId?: string
 }
 
 interface GameRenderer {
-  renderBoard: (gameState: GameState, onMove: (moveData: any) => void, user: MockUser, loading: boolean) => React.ReactNode
-  renderStatus: (gameState: GameState, players: { [key: string]: Player }, user: MockUser) => React.ReactNode
-  renderPlayers: (gameState: GameState, players: { [key: string]: Player }, user: MockUser) => React.ReactNode
-  isGameFinished: (gameState: GameState) => boolean
+  renderBoard: (gameState: any, onMove: (moveData: any) => void, user: MockUser, loading: boolean) => React.ReactNode
+  renderStatus: (gameState: any, players: { [key: string]: Player }, user: MockUser) => React.ReactNode
+  renderPlayers: (gameState: any, players: { [key: string]: Player }, user: MockUser) => React.ReactNode
+  isGameFinished: (gameState: any) => boolean
 }
 
 interface GenericGameBoardProps {

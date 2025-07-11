@@ -7,7 +7,9 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { useToast } from "@/hooks/use-toast"
-import GameBoard from "@/components/game-board"
+import GenericGameBoard from "@/components/game-board-generic"
+import { TicTacToeRenderer } from "@/components/game-renderers/tictactoe-renderer"
+import { ConnectFourRenderer } from "@/components/game-renderers/connect-four-renderer"
 import { matchmakingService } from "@/lib/matchmaking" // Use singleton instance
 import { PresenceService, type UserPresence } from "@/lib/presence"
 import { Users, Trophy, LogOut, Target, Crown, Zap, Clock, Star, X, Search } from "lucide-react"
@@ -141,7 +143,7 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
       console.log("🎮 Starting matchmaking for:", selectedGame)
 
       // Start listening for match updates first
-      const unsubscribe = matchmakingService.listenForMatch(userProfile.uid, handleMatchFound)
+      const unsubscribe = matchmakingService.listenForMatch(userProfile.uid, selectedGame, handleMatchFound)
       setMatchmakingUnsubscribe(() => unsubscribe)
 
       // Then call the matchmaking API
@@ -180,7 +182,7 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
   const handleCancelMatchmaking = async () => {
     try {
       // Cancel matchmaking on backend
-      await matchmakingService.cancelMatchmaking(userProfile.uid)
+      await matchmakingService.cancelMatchmaking(userProfile.uid, selectedGame)
       
       // Clean up listener
       if (matchmakingUnsubscribe) {
@@ -219,7 +221,7 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
     try {
       // Cancel any active matchmaking
       if (matchmaking) {
-        await matchmakingService.cancelMatchmaking(userProfile.uid)
+        await matchmakingService.cancelMatchmaking(userProfile.uid, selectedGame)
       }
 
       // Clean up listener
@@ -244,7 +246,40 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
   }
 
   if (currentMatch) {
-    return <GameBoard roomId={currentMatch} user={userProfile} onLeave={handleLeaveGame} />
+    // Extract game type from room ID (format: gameType-timestamp-random)
+    console.log("🔍 Room ID:", currentMatch);
+    
+    // Handle multi-word game types like "connect-four"
+    // Split by '-' and take all parts except the last two (timestamp and random)
+    const parts = currentMatch.split('-');
+    const gameType = parts.slice(0, -2).join('-');
+    console.log("🎮 Extracted game type:", gameType);
+    
+    // Get the appropriate renderer based on game type
+    let gameRenderer;
+    switch (gameType) {
+      case 'tictactoe':
+        gameRenderer = new TicTacToeRenderer();
+        break;
+      case 'connect-four':
+        gameRenderer = new ConnectFourRenderer();
+        break;
+      default:
+        console.warn("⚠️ Unknown game type:", gameType, "falling back to Tic Tac Toe renderer");
+        // Fallback to Tic Tac Toe renderer for unknown game types
+        gameRenderer = new TicTacToeRenderer();
+        break;
+    }
+    
+    return (
+      <GenericGameBoard 
+        gameType={gameType}
+        roomId={currentMatch} 
+        user={userProfile} 
+        onLeave={handleLeaveGame}
+        gameRenderer={gameRenderer}
+      />
+    )
   }
 
   return (

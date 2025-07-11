@@ -30,6 +30,59 @@ app.get("/games", (req, res) => {
   }
 });
 
+// Generic matchmaking endpoint for any game type
+app.post("/matchmaking/:gameType", async (req, res) => {
+  try {
+    const { gameType } = req.params;
+    const { userId, username } = req.body;
+    if (!userId || !username) {
+      return res.status(400).json({ error: "userId and username are required" });
+    }
+    console.log(`Matchmaking request for ${gameType}: ${userId} (${username})`);
+    const result = await gameManager.handleMatchmaking(gameType, userId, username);
+    console.log(`Matchmaking result for ${userId} in ${gameType}:`, result);
+    res.json(result);
+  } catch (error) {
+    console.error("Matchmaking error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/matchmaking/:gameType/cancel", async (req, res) => {
+  try {
+    const { gameType } = req.params;
+    const { userId } = req.body;
+    if (!userId) {
+      return res.status(400).json({ error: "userId is required" });
+    }
+    await gameManager.cancelMatchmaking(gameType, userId);
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Cancel matchmaking error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Generic endpoint for polling matchmaking status
+app.get("/matchmaking/:gameType/status", async (req, res) => {
+  try {
+    const { gameType } = req.params;
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({ error: "userId is required" });
+    }
+    const sessionId = await redis.get(`user:${userId}:session`);
+    if (sessionId) {
+      return res.json({ matched: true, roomId: sessionId });
+    }
+    return res.json({ matched: false });
+  } catch (error) {
+    console.error("Status matchmaking error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Keep legacy tictactoe endpoints for backward compatibility
 app.post("/matchmaking/tictactoe", async (req, res) => {
   try {
     const { userId, username } = req.body;
@@ -78,7 +131,25 @@ app.get("/matchmaking/tictactoe/status", async (req, res) => {
   }
 });
 
-// GET game state
+// Generic game state endpoint for any game type
+app.get("/game/:gameType/:roomId", async (req, res) => {
+  try {
+    const { gameType, roomId } = req.params;
+    console.log(`🎮 GET /game/${gameType}/${roomId} - Requesting game state`);
+    const sessionData = await gameManager.getSession(gameType, roomId);
+    if (!sessionData) {
+      console.log(`❌ Game not found: ${gameType}/${roomId}`);
+      return res.status(404).json({ error: "Game not found" });
+    }
+    console.log(`✅ Game found: ${gameType}/${roomId}`);
+    res.json(sessionData);
+  } catch (error) {
+    console.error("Get game state error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET game state (legacy tictactoe endpoint)
 app.get("/game/tictactoe/:roomId", async (req, res) => {
   try {
     const { roomId } = req.params;
@@ -93,7 +164,68 @@ app.get("/game/tictactoe/:roomId", async (req, res) => {
   }
 });
 
-// POST make move
+// Generic move endpoint for any game type
+app.post("/game/:gameType/:roomId/move", async (req, res) => {
+  try {
+    const { gameType, roomId } = req.params;
+    const { userId, ...moveData } = req.body;
+    
+    const game = await gameManager.getSession(gameType, roomId);
+    if (!game) {
+      return res.status(404).json({ error: "Game not found" });
+    }
+    
+    const { gameState } = game;
+    if (!gameState) {
+      return res.status(400).json({ error: "Invalid game state" });
+    }
+    
+    // Validate move using game manager
+    const validation = gameManager.validateMove(gameType, gameState, userId, moveData);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error });
+    }
+    
+    // Make move using game manager
+    const newGameState = gameManager.makeMove(gameType, gameState, userId, moveData);
+    game.gameState = newGameState;
+    
+    // Check if game ended
+    const gameEnd = gameManager.checkGameEnd(gameType, newGameState);
+    
+    if (gameEnd.finished) {
+      await updatePlayerStats(game, gameEnd.winner, gameEnd.isDraw);
+      game.status = "finished";
+      
+      // Check if result screen tracking already exists
+      if (!playersOnResultScreen.has(roomId)) {
+        // Initialize result screen tracking for both players
+        const playerX = game.gameState.playerX;
+        const playerO = game.gameState.playerO;
+        playersOnResultScreen.set(roomId, new Set([playerX, playerO]));
+        
+        // Set timeout for automatic cleanup (60 seconds)
+        const timeout = setTimeout(async () => {
+          console.log(`Auto-cleanup timeout triggered for room: ${roomId}`);
+          await cleanupResultScreen(roomId);
+        }, 60000);
+        resultScreenTimeouts.set(roomId, timeout);
+        
+        console.log(`Game finished, result screen initialized: ${roomId}`);
+      } else {
+        console.log(`Result screen already initialized for room: ${roomId}`);
+      }
+    }
+    
+    await gameManager.updateSession(gameType, roomId, game);
+    res.json(game);
+  } catch (error) {
+    console.error("Move error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST make move (legacy tictactoe endpoint)
 app.post("/game/tictactoe/:roomId/move", async (req, res) => {
   try {
     const { roomId } = req.params;
@@ -154,7 +286,67 @@ app.post("/game/tictactoe/:roomId/move", async (req, res) => {
   }
 });
 
-// POST leave game
+// Generic leave game endpoint for any game type
+app.post("/game/:gameType/:roomId/leave", async (req, res) => {
+  try {
+    const { gameType, roomId } = req.params;
+    const { userId } = req.body;
+    const sessionKey = `${gameType}:session:${roomId}`;
+    const sessionData = await redis.get(sessionKey);
+    if (!sessionData) {
+      return res.status(404).json({ error: "Game not found" });
+    }
+    const game = JSON.parse(sessionData);
+    const { gameState } = game;
+    if (!gameState) {
+      return res.status(400).json({ error: "Invalid game state" });
+    }
+    if (gameState.winner) {
+      // Game already finished, do nothing
+      return res.json({ message: "Game already finished" });
+    }
+    // Determine the other player
+    let winnerId = null;
+    if (gameState.playerX === userId) {
+      winnerId = gameState.playerO;
+    } else if (gameState.playerO === userId) {
+      winnerId = gameState.playerX;
+    } else {
+      return res.status(400).json({ error: "User not in this game" });
+    }
+    // Set winner and update game state
+    gameState.winner = (gameState.playerX === winnerId) ? "X" : "O";
+    game.status = "finished";
+    await redis.set(sessionKey, JSON.stringify(game));
+    // Update stats in Firestore
+    await updatePlayerStats(game, gameState.winner, false, userId);
+    
+    // Check if result screen tracking already exists
+    if (!playersOnResultScreen.has(roomId)) {
+      // Initialize result screen tracking for both players
+      const playerX = gameState.playerX;
+      const playerO = gameState.playerO;
+      playersOnResultScreen.set(roomId, new Set([playerX, playerO]));
+      
+      // Set timeout for automatic cleanup (60 seconds)
+      const timeout = setTimeout(async () => {
+        console.log(`Auto-cleanup timeout triggered for room: ${roomId}`);
+        await cleanupResultScreen(roomId);
+      }, 60000);
+      resultScreenTimeouts.set(roomId, timeout);
+      
+      console.log(`Player forfeited, result screen initialized: ${roomId}`);
+    } else {
+      console.log(`Result screen already initialized for room: ${roomId}`);
+    }
+    res.json({ message: "Player left, opponent wins", winner: winnerId });
+  } catch (error) {
+    console.error("Leave game error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST leave game (legacy tictactoe endpoint)
 app.post("/game/tictactoe/:roomId/leave", async (req, res) => {
   try {
     const { roomId } = req.params;
@@ -214,7 +406,33 @@ app.post("/game/tictactoe/:roomId/leave", async (req, res) => {
   }
 });
 
-// POST leave result screen
+// Generic leave result screen endpoint for any game type
+app.post("/game/:gameType/:roomId/leave-result", async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const { userId } = req.body;
+    
+    const playersOnResult = playersOnResultScreen.get(roomId);
+    if (!playersOnResult) {
+      return res.status(404).json({ error: "Result screen not found" });
+    }
+    
+    // Remove player from result screen
+    playersOnResult.delete(userId);
+    
+    // If no players left on result screen, cleanup the room
+    if (playersOnResult.size === 0) {
+      await cleanupResultScreen(roomId);
+    }
+    
+    res.json({ message: "Left result screen" });
+  } catch (error) {
+    console.error("Leave result screen error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST leave result screen (legacy tictactoe endpoint)
 app.post("/game/tictactoe/:roomId/leave-result", async (req, res) => {
   try {
     const { roomId } = req.params;

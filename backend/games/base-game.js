@@ -135,6 +135,56 @@ export class BaseGame {
     await redis.del(`user:${userId}:session`);
   }
 
+  // Get queue length
+  async getQueueLength() {
+    const redis = await this.getRedis();
+    return await redis.lLen(this.queueKey);
+  }
+
+  // Pop from queue
+  async popFromQueue() {
+    const redis = await this.getRedis();
+    return await redis.lPop(this.queueKey);
+  }
+
+  // Add to queue
+  async addToQueue(player) {
+    const redis = await this.getRedis();
+    return await redis.rPush(this.queueKey, JSON.stringify(player));
+  }
+
+  // Create a new match
+  async createMatch(players) {
+    const redis = await this.getRedis();
+    const roomId = `${this.gameType}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    
+    console.log(`🔧 Creating match with room ID: ${roomId} for game type: ${this.gameType}`);
+    
+    // Create initial game state
+    const gameState = this.createInitialGameState(players);
+    
+    // Create session data
+    const sessionData = {
+      roomId,
+      gameType: this.gameType,
+      players,
+      gameState,
+      status: 'active',
+      createdAt: Date.now()
+    };
+    
+    // Save session to Redis
+    await redis.set(`${this.sessionPrefix}${roomId}`, JSON.stringify(sessionData));
+    
+    // Map each player to the session
+    for (const player of players) {
+      await redis.set(`user:${player.userId}:session`, roomId);
+    }
+    
+    console.log(`Created ${this.gameType} match ${roomId} with ${players.length} players`);
+    return { matched: true, roomId };
+  }
+
   // Abstract methods that must be implemented by subclasses
   async tryMatchPlayers() {
     throw new Error('tryMatchPlayers must be implemented by subclass');

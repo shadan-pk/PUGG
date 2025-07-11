@@ -49,13 +49,13 @@ export class MatchmakingService {
   /**
    * Polls the backend for match status. Calls onMatch(roomId) when matched.
    */
-  listenForMatch(userId: string, onMatch: (roomId: string) => void): () => void {
+  listenForMatch(userId: string, gameType: string, onMatch: (roomId: string) => void): () => void {
     let stopped = false;
     const poll = async () => {
       while (!stopped) {
         try {
           // This endpoint is game-agnostic since it checks user session mapping
-          const res = await fetch(`http://localhost:3001/matchmaking/tictactoe/status?userId=${userId}`);
+          const res = await fetch(`http://localhost:3001/matchmaking/${gameType}/status?userId=${userId}`);
           if (res.ok) {
             const data = await res.json();
             if (data.matched && data.roomId) {
@@ -78,12 +78,12 @@ export class MatchmakingService {
   /**
    * Cancel matchmaking for a user
    */
-  async cancelMatchmaking(userId: string): Promise<void> {
+  async cancelMatchmaking(userId: string, gameType: string): Promise<void> {
     this.matchmakingInProgress.delete(userId);
     this.cleanupListener(userId);
     try {
       // This endpoint is game-agnostic since it removes user from any queue
-      const res = await fetch("http://localhost:3001/matchmaking/tictactoe/cancel", {
+      const res = await fetch(`http://localhost:3001/matchmaking/${gameType}/cancel`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId }),
@@ -91,7 +91,7 @@ export class MatchmakingService {
       if (!res.ok) {
         throw new Error(`Failed to cancel matchmaking: ${res.status} ${res.statusText}`);
       }
-      console.log(`Matchmaking cancelled for user ${userId}`);
+      console.log(`Matchmaking cancelled for user ${userId} in ${gameType}`);
     } catch (error) {
       console.error("Error cancelling matchmaking:", error);
       throw error;

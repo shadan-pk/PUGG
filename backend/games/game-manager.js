@@ -1,5 +1,6 @@
 // backend/games/game-manager.js
 import { TicTacToeGame } from './tictactoe.js';
+import { ConnectFourGame } from './connect-four.js';
 
 class GameManager {
   constructor() {
@@ -10,6 +11,7 @@ class GameManager {
   initializeGames() {
     // Register all games
     this.registerGame('tictactoe', new TicTacToeGame());
+    this.registerGame('connect-four', new ConnectFourGame());
   }
 
   registerGame(gameType, gameInstance) {

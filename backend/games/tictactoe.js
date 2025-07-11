@@ -1,6 +1,6 @@
 // backend/games/tictactoe.js
 import { BaseGame } from './base-game.js';
-
+  
 export class TicTacToeGame extends BaseGame {
   constructor() {
     super('tictactoe');
@@ -40,12 +40,12 @@ export class TicTacToeGame extends BaseGame {
 
   createInitialGameState(players) {
     return {
-      board: Array(9).fill(null),
+            board: Array(9).fill(null),
       currentPlayer: 'X',
-      winner: null,
+            winner: null,
       playerX: players[0].userId,
       playerO: players[1].userId,
-      moves: 0
+            moves: 0
     };
   }
 
@@ -120,8 +120,8 @@ export class TicTacToeGame extends BaseGame {
     for (const [a, b, c] of lines) {
       if (board[a] && board[a] === board[b] && board[a] === board[c]) {
         return board[a];
-      }
-    }
+  }
+}
     return null;
   }
 
@@ -137,49 +137,10 @@ export class TicTacToeGame extends BaseGame {
     return 2;
   }
 
-  // Helper methods
-  async getQueueLength() {
-    const redis = await this.getRedis();
-    return await redis.lLen(this.queueKey);
-  }
+  // Helper methods are now inherited from BaseGame
 
-  async popFromQueue() {
-    const redis = await this.getRedis();
-    return await redis.lPop(this.queueKey);
-  }
-
-  async addToQueue(player) {
-    const redis = await this.getRedis();
-    return await redis.rPush(this.queueKey, JSON.stringify(player));
-  }
-
-  async createMatch(players) {
-    const roomId = `${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-    
-    console.log(`Creating match: ${players[0].username} vs ${players[1].username} in room ${roomId}`);
-
-    // Create session data
-    const sessionData = {
-      roomId,
-      players: {
-        [players[0].userId]: { name: players[0].username },
-        [players[1].userId]: { name: players[1].username }
-      },
-      createdAt: Date.now(),
-      status: 'active',
-      gameState: this.createInitialGameState(players)
-    };
-
-    // Store session
-    await this.updateSession(roomId, sessionData);
-
-    // Map users to session
-    await this.setUserSession(players[0].userId, roomId);
-    await this.setUserSession(players[1].userId, roomId);
-
-    console.log(`Match created successfully for room ${roomId}`);
-    return { matched: true, roomId };
-  }
+  // Use the BaseGame createMatch method instead of custom implementation
+  // This ensures consistent room ID format across all games
 }
 
 // Create and export a singleton instance

@@ -52,6 +52,9 @@ export default function GameBoard({
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const [leaving, setLeaving] = useState(false);
 
+  // Extract game type from room ID (format: gameType-timestamp-random)
+  const gameType = roomId.split('-')[0];
+
   // Poll game state every second
   useEffect(() => {
     let stopped = false;
