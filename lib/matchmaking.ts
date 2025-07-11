@@ -20,14 +20,14 @@ export class MatchmakingService {
   /**
    * Calls the backend matchmaking API. Returns { matched, roomId } or { matched: false }.
    */
-  async joinMatchmaking(userId: string, username: string, gameMode: string): Promise<{ matched: boolean; roomId?: string }> {
+  async joinMatchmaking(userId: string, username: string, gameType: string): Promise<{ matched: boolean; roomId?: string }> {
     if (this.matchmakingInProgress.has(userId)) {
       console.log(`Matchmaking already in progress for user ${userId}`);
       return { matched: false };
     }
     this.matchmakingInProgress.add(userId);
     try {
-      const res = await fetch("http://localhost:3001/matchmaking/tictactoe", {
+      const res = await fetch(`http://localhost:3001/matchmaking/${gameType}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId, username }),
@@ -54,6 +54,7 @@ export class MatchmakingService {
     const poll = async () => {
       while (!stopped) {
         try {
+          // This endpoint is game-agnostic since it checks user session mapping
           const res = await fetch(`http://localhost:3001/matchmaking/tictactoe/status?userId=${userId}`);
           if (res.ok) {
             const data = await res.json();
@@ -81,6 +82,7 @@ export class MatchmakingService {
     this.matchmakingInProgress.delete(userId);
     this.cleanupListener(userId);
     try {
+      // This endpoint is game-agnostic since it removes user from any queue
       const res = await fetch("http://localhost:3001/matchmaking/tictactoe/cancel", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

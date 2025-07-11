@@ -32,51 +32,49 @@ interface UserProfile {
   }
 }
 
+interface AvailableGame {
+  type: string
+  name: string
+  minPlayers: number
+  maxPlayers: number
+}
+
 interface GameLobbyProps {
   userProfile: UserProfile
 }
 
-const GAME_MODES = [
-  {
-    id: "tic-tac-toe",
-    name: "Tic-Tac-Toe",
-    description: "Classic 3x3 strategy game",
-    icon: "🎯",
-    players: "1v1",
-    duration: "2-5 min",
-    difficulty: "Easy",
-    available: true,
-  },
-  {
-    id: "connect-four",
-    name: "Connect Four",
-    description: "Drop and connect four in a row",
-    icon: "🔴",
-    players: "1v1",
-    duration: "3-8 min",
-    difficulty: "Medium",
-    available: false,
-  },
-  {
-    id: "word-battle",
-    name: "Word Battle",
-    description: "Fast-paced word formation game",
-    icon: "📝",
-    players: "1v1",
-    duration: "5-10 min",
-    difficulty: "Hard",
-    available: false,
-  },
-]
-
 export default function GameLobby({ userProfile }: GameLobbyProps) {
-  const [selectedMode, setSelectedMode] = useState("tic-tac-toe")
+  const [availableGames, setAvailableGames] = useState<AvailableGame[]>([])
+  const [selectedGame, setSelectedGame] = useState<string>("")
   const [matchmaking, setMatchmaking] = useState(false)
   const [currentMatch, setCurrentMatch] = useState<string | null>(null)
   const [onlineUsers, setOnlineUsers] = useState<UserPresence[]>([])
   const [presenceService] = useState(() => new PresenceService(userProfile.uid, userProfile.username))
   const [matchmakingUnsubscribe, setMatchmakingUnsubscribe] = useState<(() => void) | null>(null)
   const { toast } = useToast()
+
+  // Fetch available games from backend
+  useEffect(() => {
+    const fetchAvailableGames = async () => {
+      try {
+        const response = await fetch('http://localhost:3001/games');
+        if (response.ok) {
+          const games = await response.json();
+          setAvailableGames(games);
+          // Set first available game as default
+          if (games.length > 0 && !selectedGame) {
+            setSelectedGame(games[0].type);
+          }
+        } else {
+          console.error('Failed to fetch available games');
+        }
+      } catch (error) {
+        console.error('Error fetching available games:', error);
+      }
+    };
+
+    fetchAvailableGames();
+  }, [selectedGame]);
 
   // Handle match found callback
   const handleMatchFound = useCallback((roomId: string) => {
@@ -128,26 +126,36 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
       return
     }
 
+    if (!selectedGame) {
+      toast({
+        title: "No Game Selected",
+        description: "Please select a game to play.",
+        variant: "destructive",
+      })
+      return
+    }
+
     setMatchmaking(true)
 
     try {
-      console.log("🎮 Starting matchmaking for:", selectedMode)
+      console.log("🎮 Starting matchmaking for:", selectedGame)
 
       // Start listening for match updates first
       const unsubscribe = matchmakingService.listenForMatch(userProfile.uid, handleMatchFound)
       setMatchmakingUnsubscribe(() => unsubscribe)
 
       // Then call the matchmaking API
-      const result = await matchmakingService.joinMatchmaking(userProfile.uid, userProfile.username, selectedMode)
+      const result = await matchmakingService.joinMatchmaking(userProfile.uid, userProfile.username, selectedGame)
 
       if (result.matched && result.roomId) {
         // Immediate match found
         handleMatchFound(result.roomId)
       } else {
         // Waiting for opponent
+        const gameName = availableGames.find(g => g.type === selectedGame)?.name || selectedGame;
         toast({
           title: "🔍 Searching for Opponent",
-          description: `Looking for players in ${GAME_MODES.find((m) => m.id === selectedMode)?.name}...`,
+          description: `Looking for players in ${gameName}...`,
         })
         // Keep matchmaking state true and listener active
       }
@@ -292,38 +300,30 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
-                {GAME_MODES.map((mode) => (
+                {availableGames.map((game) => (
                   <div
-                    key={mode.id}
+                    key={game.type}
                     className={`p-4 rounded-lg border-2 cursor-pointer transition-all duration-200 ${
-                      selectedMode === mode.id
+                      selectedGame === game.type
                         ? "border-blue-500 bg-blue-500/10"
-                        : mode.available
-                        ? "border-slate-700 bg-slate-800/30 hover:border-slate-600"
-                        : "border-slate-800 bg-slate-900/50 opacity-50 cursor-not-allowed"
+                        : "border-slate-700 bg-slate-800/30 hover:border-slate-600"
                     }`}
-                    onClick={() => mode.available && setSelectedMode(mode.id)}
+                    onClick={() => setSelectedGame(game.type)}
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center space-x-3">
-                        <div className="text-2xl">{mode.icon}</div>
+                        <div className="text-2xl">{game.name.charAt(0)}</div>
                         <div>
-                          <h3 className="font-semibold text-slate-100">{mode.name}</h3>
-                          <p className="text-sm text-slate-400">{mode.description}</p>
+                          <h3 className="font-semibold text-slate-100">{game.name}</h3>
+                          <p className="text-sm text-slate-400">
+                            {game.minPlayers}v{game.maxPlayers}
+                          </p>
                         </div>
                       </div>
                       <div className="flex items-center space-x-2">
                         <Badge variant="secondary" className="text-xs">
-                          {mode.players}
+                          {game.minPlayers}v{game.maxPlayers}
                         </Badge>
-                        <Badge variant="outline" className="text-xs">
-                          {mode.duration}
-                        </Badge>
-                        {!mode.available && (
-                          <Badge variant="destructive" className="text-xs">
-                            Coming Soon
-                          </Badge>
-                        )}
                       </div>
                     </div>
                   </div>
@@ -389,7 +389,7 @@ export default function GameLobby({ userProfile }: GameLobbyProps) {
                   <Button
                     onClick={handleStartMatch}
                     className="w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-semibold py-3"
-                    disabled={!GAME_MODES.find(m => m.id === selectedMode)?.available}
+                    disabled={!selectedGame}
                   >
                     <Search className="w-4 h-4 mr-2" />
                     Find Match

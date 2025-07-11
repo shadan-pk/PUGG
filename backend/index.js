@@ -4,6 +4,7 @@ import cors from "cors";
 import { handleMatchmaking, cancelMatchmaking } from "./games/tictactoe.js";
 import { createClient } from 'redis';
 import { db as firestore } from "./utils/firestore.js";
+import gameManager from "./games/game-manager.js";
 
 const redis = createClient({ url: 'redis://localhost:6379' });
 redis.connect().catch(console.error);
@@ -18,6 +19,17 @@ app.use(express.json());
 const playersOnResultScreen = new Map(); // roomId -> Set of userIds
 const resultScreenTimeouts = new Map(); // roomId -> timeout
 
+// GET available games
+app.get("/games", (req, res) => {
+  try {
+    const availableGames = gameManager.getAvailableGames();
+    res.json(availableGames);
+  } catch (error) {
+    console.error("Error getting available games:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 app.post("/matchmaking/tictactoe", async (req, res) => {
   try {
     const { userId, username } = req.body;
@@ -25,7 +37,7 @@ app.post("/matchmaking/tictactoe", async (req, res) => {
       return res.status(400).json({ error: "userId and username are required" });
     }
     console.log(`Matchmaking request: ${userId} (${username})`);
-    const result = await handleMatchmaking(userId, username);
+    const result = await gameManager.handleMatchmaking('tictactoe', userId, username);
     console.log(`Matchmaking result for ${userId}:`, result);
     res.json(result);
   } catch (error) {
@@ -40,7 +52,7 @@ app.post("/matchmaking/tictactoe/cancel", async (req, res) => {
     if (!userId) {
       return res.status(400).json({ error: "userId is required" });
     }
-    await cancelMatchmaking(userId);
+    await gameManager.cancelMatchmaking('tictactoe', userId);
     res.json({ success: true });
   } catch (error) {
     console.error("Cancel matchmaking error:", error);
@@ -70,12 +82,11 @@ app.get("/matchmaking/tictactoe/status", async (req, res) => {
 app.get("/game/tictactoe/:roomId", async (req, res) => {
   try {
     const { roomId } = req.params;
-    const sessionKey = `tictactoe:session:${roomId}`;
-    const sessionData = await redis.get(sessionKey);
+    const sessionData = await gameManager.getSession('tictactoe', roomId);
     if (!sessionData) {
       return res.status(404).json({ error: "Game not found" });
     }
-    res.json(JSON.parse(sessionData));
+    res.json(sessionData);
   } catch (error) {
     console.error("Get game state error:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -86,46 +97,34 @@ app.get("/game/tictactoe/:roomId", async (req, res) => {
 app.post("/game/tictactoe/:roomId/move", async (req, res) => {
   try {
     const { roomId } = req.params;
-    const { userId, index } = req.body;
-    const sessionKey = `tictactoe:session:${roomId}`;
-    const sessionData = await redis.get(sessionKey);
-    if (!sessionData) {
+    const { userId, ...moveData } = req.body;
+    
+    const game = await gameManager.getSession('tictactoe', roomId);
+    if (!game) {
       return res.status(404).json({ error: "Game not found" });
     }
-    const game = JSON.parse(sessionData);
+    
     const { gameState } = game;
-    if (!gameState || gameState.board[index] || gameState.winner) {
-      return res.status(400).json({ error: "Invalid move" });
+    if (!gameState) {
+      return res.status(400).json({ error: "Invalid game state" });
     }
-    // Validate player
-    const isPlayerX = gameState.playerX === userId;
-    const isPlayerO = gameState.playerO === userId;
-    const isCurrentPlayer =
-      (gameState.currentPlayer === "X" && isPlayerX) ||
-      (gameState.currentPlayer === "O" && isPlayerO);
-    if (!isCurrentPlayer) {
-      return res.status(400).json({ error: "Not your turn" });
+    
+    // Validate move using game manager
+    const validation = gameManager.validateMove('tictactoe', gameState, userId, moveData);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error });
     }
-    // Make move
-    const newBoard = [...gameState.board];
-    newBoard[index] = gameState.currentPlayer;
-    const winner = checkWinner(newBoard);
-    const isDraw = !winner && newBoard.every((cell) => cell !== null);
-    const newGameState = {
-      ...gameState,
-      board: newBoard,
-      currentPlayer: gameState.currentPlayer === "X" ? "O" : "X",
-      winner: winner || (isDraw ? "draw" : null),
-      moves: gameState.moves + 1,
-    };
+    
+    // Make move using game manager
+    const newGameState = gameManager.makeMove('tictactoe', gameState, userId, moveData);
     game.gameState = newGameState;
-    await redis.set(sessionKey, JSON.stringify(game));
-    // If game finished, update stats and initialize result screen tracking
-    if (winner || isDraw) {
-      await updatePlayerStats(game, winner, isDraw);
-      // Mark game as finished and initialize result screen tracking
+    
+    // Check if game ended
+    const gameEnd = gameManager.checkGameEnd('tictactoe', newGameState);
+    
+    if (gameEnd.finished) {
+      await updatePlayerStats(game, gameEnd.winner, gameEnd.isDraw);
       game.status = "finished";
-      await redis.set(sessionKey, JSON.stringify(game));
       
       // Check if result screen tracking already exists
       if (!playersOnResultScreen.has(roomId)) {
@@ -146,6 +145,8 @@ app.post("/game/tictactoe/:roomId/move", async (req, res) => {
         console.log(`Result screen already initialized for room: ${roomId}`);
       }
     }
+    
+    await gameManager.updateSession('tictactoe', roomId, game);
     res.json(game);
   } catch (error) {
     console.error("Move error:", error);
