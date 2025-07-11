@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import { handleMatchmaking, cancelMatchmaking } from "./games/tictactoe.js";
 import { createClient } from 'redis';
+import { db as firestore } from "./utils/firestore.js";
 
 const redis = createClient({ url: 'redis://localhost:6379' });
 redis.connect().catch(console.error);
@@ -115,12 +116,125 @@ app.post("/game/tictactoe/:roomId/move", async (req, res) => {
     };
     game.gameState = newGameState;
     await redis.set(sessionKey, JSON.stringify(game));
+    // If game finished, update stats
+    if (winner || isDraw) {
+      await updatePlayerStats(game, winner, isDraw);
+      // Clean up session from Redis
+      await redis.del(sessionKey);
+      const playerX = game.gameState.playerX;
+      const playerO = game.gameState.playerO;
+      await redis.del(`user:${playerX}:session`);
+      await redis.del(`user:${playerO}:session`);
+    }
     res.json(game);
   } catch (error) {
     console.error("Move error:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+// POST leave game
+app.post("/game/tictactoe/:roomId/leave", async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const { userId } = req.body;
+    const sessionKey = `tictactoe:session:${roomId}`;
+    const sessionData = await redis.get(sessionKey);
+    if (!sessionData) {
+      return res.status(404).json({ error: "Game not found" });
+    }
+    const game = JSON.parse(sessionData);
+    const { gameState } = game;
+    if (!gameState) {
+      return res.status(400).json({ error: "Invalid game state" });
+    }
+    if (gameState.winner) {
+      // Game already finished, do nothing
+      return res.json({ message: "Game already finished" });
+    }
+    // Determine the other player
+    let winnerId = null;
+    if (gameState.playerX === userId) {
+      winnerId = gameState.playerO;
+    } else if (gameState.playerO === userId) {
+      winnerId = gameState.playerX;
+    } else {
+      return res.status(400).json({ error: "User not in this game" });
+    }
+    // Set winner and update game state
+    gameState.winner = (gameState.playerX === winnerId) ? "X" : "O";
+    game.status = "finished";
+    await redis.set(sessionKey, JSON.stringify(game));
+    // Update stats in Firestore
+    await updatePlayerStats(game, gameState.winner, false, userId);
+    // Clean up session from Redis
+    await redis.del(sessionKey);
+    const playerX = gameState.playerX;
+    const playerO = gameState.playerO;
+    await redis.del(`user:${playerX}:session`);
+    await redis.del(`user:${playerO}:session`);
+    res.json({ message: "Player left, opponent wins", winner: winnerId });
+  } catch (error) {
+    console.error("Leave game error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+async function updatePlayerStats(game, winner, isDraw, forfeitUserId = null) {
+  try {
+    const playerX = game.gameState.playerX;
+    const playerO = game.gameState.playerO;
+    const userRefs = [
+      firestore.collection("users").doc(playerX),
+      firestore.collection("users").doc(playerO),
+    ];
+    const updates = [
+      { gamesPlayed: 1, wins: 0, losses: 0, draws: 0 },
+      { gamesPlayed: 1, wins: 0, losses: 0, draws: 0 },
+    ];
+    if (isDraw) {
+      updates[0].draws = 1;
+      updates[1].draws = 1;
+    } else if (winner === "X") {
+      updates[0].wins = 1;
+      updates[1].losses = 1;
+    } else if (winner === "O") {
+      updates[0].losses = 1;
+      updates[1].wins = 1;
+    }
+    // If forfeit, adjust winner/loser
+    if (forfeitUserId) {
+      if (playerX === forfeitUserId) {
+        updates[0].losses = 1;
+        updates[0].wins = 0;
+        updates[1].wins = 1;
+        updates[1].losses = 0;
+      } else if (playerO === forfeitUserId) {
+        updates[1].losses = 1;
+        updates[1].wins = 0;
+        updates[0].wins = 1;
+        updates[0].losses = 0;
+      }
+    }
+    // Use Firestore transactions to update stats
+    await firestore.runTransaction(async (t) => {
+      for (let i = 0; i < 2; i++) {
+        const userRef = userRefs[i];
+        const userSnap = await t.get(userRef);
+        const stats = userSnap.exists && userSnap.data().stats ? userSnap.data().stats : { gamesPlayed: 0, wins: 0, losses: 0, draws: 0 };
+        t.update(userRef, {
+          "stats.gamesPlayed": (stats.gamesPlayed || 0) + updates[i].gamesPlayed,
+          "stats.wins": (stats.wins || 0) + updates[i].wins,
+          "stats.losses": (stats.losses || 0) + updates[i].losses,
+          "stats.draws": (stats.draws || 0) + updates[i].draws,
+        });
+      }
+    });
+    console.log(`Updated stats for ${playerX} and ${playerO}`);
+  } catch (error) {
+    console.error("Error updating player stats:", error);
+  }
+}
 
 function checkWinner(board) {
   const lines = [

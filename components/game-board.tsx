@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { useToast } from "@/hooks/use-toast"
 import { ArrowLeft, RotateCcw, Trophy, Users, Copy, Share2 } from "lucide-react"
+import { Dialog } from "@/components/ui/dialog" // If you have a dialog component, otherwise use window.confirm
 
 interface GameState {
   board: (string | null)[]
@@ -46,6 +47,11 @@ export default function GameBoard({
   const [loading, setLoading] = useState(false)
   const [connectionError, setConnectionError] = useState<string | null>(null)
   const { toast } = useToast()
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const [showMatchEnd, setShowMatchEnd] = useState(false);
+  const [hasHandledMatchEnd, setHasHandledMatchEnd] = useState(false);
+  const [wasGameFinished, setWasGameFinished] = useState(false);
 
   // Poll game state every second
   useEffect(() => {
@@ -58,8 +64,21 @@ export default function GameBoard({
             const data = await res.json();
             setRoomData(data);
             setConnectionError(null);
+            if (data.gameState && data.gameState.winner) {
+              setWasGameFinished(true);
+            }
           } else {
-            setConnectionError("Room not found");
+            // If room not found, but game was finished, treat as normal end
+            if (wasGameFinished) {
+              setShowMatchEnd(true);
+              setTimeout(() => {
+                setShowMatchEnd(false);
+                onLeave();
+              }, 2000);
+              return;
+            } else {
+              setConnectionError("Room not found");
+            }
           }
         } catch (error) {
           setConnectionError("Failed to fetch game state");
@@ -71,7 +90,19 @@ export default function GameBoard({
     return () => {
       stopped = true;
     };
-  }, [roomId]);
+  }, [roomId, wasGameFinished, onLeave]);
+
+  // Show popup and return to home when match ends
+  useEffect(() => {
+    if (roomData && roomData.gameState && roomData.gameState.winner && !hasHandledMatchEnd) {
+      setShowMatchEnd(true);
+      setHasHandledMatchEnd(true);
+      setTimeout(() => {
+        setShowMatchEnd(false);
+        onLeave();
+      }, 2000);
+    }
+  }, [roomData, hasHandledMatchEnd, onLeave]);
 
   const makeMove = async (index: number) => {
     if (!roomData || roomData.gameState.board[index] || roomData.gameState.winner) return
@@ -143,6 +174,27 @@ export default function GameBoard({
       await copyRoomId()
     }
   }
+
+  const handleLeaveGame = async () => {
+    setShowLeaveConfirm(true);
+  };
+
+  const confirmLeave = async () => {
+    setLeaving(true);
+    try {
+      await fetch(`http://localhost:3001/game/tictactoe/${roomId}/leave`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: user.uid }),
+      });
+    } catch (error) {
+      // Optionally show error
+    } finally {
+      setLeaving(false);
+      setShowLeaveConfirm(false);
+      onLeave();
+    }
+  };
 
   // Handle connection errors
   if (connectionError) {
@@ -216,7 +268,7 @@ export default function GameBoard({
       <div className="max-w-2xl mx-auto space-y-6">
         {/* Header */}
         <div className="flex items-center justify-between">
-          <Button onClick={onLeave} variant="outline" size="sm">
+          <Button onClick={handleLeaveGame} variant="outline" size="sm">
             <ArrowLeft className="h-4 w-4 mr-2" />
             Leave Game
           </Button>
@@ -311,6 +363,26 @@ export default function GameBoard({
           )}
         </div>
       </div>
+      {showLeaveConfirm && (
+        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50">
+          <div className="bg-white dark:bg-gray-900 p-6 rounded-lg shadow-lg max-w-sm w-full">
+            <h2 className="text-lg font-bold mb-2">Leave Game?</h2>
+            <p className="mb-4">Leaving will forfeit the game and your opponent will win. Are you sure?</p>
+            <div className="flex justify-end gap-2">
+              <Button onClick={() => setShowLeaveConfirm(false)} variant="outline" disabled={leaving}>Cancel</Button>
+              <Button onClick={confirmLeave} variant="destructive" disabled={leaving}>Leave & Forfeit</Button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showMatchEnd && (
+        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50">
+          <div className="bg-white dark:bg-gray-900 p-6 rounded-lg shadow-lg max-w-sm w-full">
+            <h2 className="text-lg font-bold mb-2">Match Finished</h2>
+            <p className="mb-4">Match finished! Returning to home screen...</p>
+          </div>
+        </div>
+      )}
     </div>
-  )
+  );
 }

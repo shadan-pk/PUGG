@@ -8,11 +8,32 @@ export async function handleMatchmaking(userId, username) {
   const queueKey = 'tictactoe:queue';
   const sessionPrefix = 'tictactoe:session:';
 
-  // Check if user is already in a session
-  const existingSessionId = await redis.get(`user:${userId}:session`);
+  // HARD RESET: Remove user from queue if present and delete their session mapping
+  const queue = await redis.lRange(queueKey, 0, -1);
+  for (let i = 0; i < queue.length; i++) {
+    const player = JSON.parse(queue[i]);
+    if (player.userId === userId) {
+      await redis.lRem(queueKey, 1, queue[i]);
+      console.log(`[HARD RESET] Removed ${userId} from queue`);
+      break;
+    }
+  }
+  await redis.del(`user:${userId}:session`);
+  console.log(`[HARD RESET] Deleted user-to-session mapping for user:${userId}:session`);
+
+  // Defensive: Check if user is already in a session, and if the session actually exists
+  const userSessionKey = `user:${userId}:session`;
+  const existingSessionId = await redis.get(userSessionKey);
   if (existingSessionId) {
-    console.log(`User ${userId} already in session ${existingSessionId}`);
-    return { matched: true, roomId: existingSessionId };
+    const sessionExists = await redis.exists(`${sessionPrefix}${existingSessionId}`);
+    if (sessionExists) {
+      console.log(`User ${userId} already in session ${existingSessionId}`);
+      return { matched: true, roomId: existingSessionId };
+    } else {
+      // Clean up stale mapping
+      await redis.del(userSessionKey);
+      console.log(`Cleaned up stale session mapping for user ${userId}`);
+    }
   }
 
   // Add user to the matchmaking queue
@@ -96,4 +117,5 @@ export async function cancelMatchmaking(userId) {
   }
   // Optionally, remove session mapping if exists
   await redis.del(`user:${userId}:session`);
+  console.log(`Deleted user-to-session mapping for user:${userId}:session`);
 }
