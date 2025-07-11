@@ -163,11 +163,18 @@ export class BaseGame {
     // Create initial game state
     const gameState = this.createInitialGameState(players);
     
+    // Transform players array to the expected format for renderers
+    // Convert from [{userId, username}, {userId, username}] to {userId: {name: username}, userId2: {name: username2}}
+    const playersMap = {};
+    for (const player of players) {
+      playersMap[player.userId] = { name: player.username };
+    }
+    
     // Create session data
     const sessionData = {
       roomId,
       gameType: this.gameType,
-      players,
+      players: playersMap,  // Use the transformed players map
       gameState,
       status: 'active',
       createdAt: Date.now()
