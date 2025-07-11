@@ -81,11 +81,22 @@ export default function GenericGameBoard({
             data.roomId = roomId; // Add roomId to the data
             setRoomData(data);
             setConnectionError(null);
+          } else if (res.status === 404) {
+            // Game not found - this could be because it was cleaned up
+            setConnectionError("Game session has ended. Returning to lobby...");
+            // Auto-return to lobby after a short delay
+            setTimeout(() => {
+              if (!stopped) {
+                onLeave();
+              }
+            }, 2000);
+            break; // Stop polling
           } else {
-            setConnectionError("Room not found");
+            setConnectionError("Failed to fetch game state");
           }
         } catch (error) {
-          setConnectionError("Failed to fetch game state");
+          console.error("Polling error:", error);
+          setConnectionError("Failed to connect to game server");
         }
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
@@ -94,7 +105,7 @@ export default function GenericGameBoard({
     return () => {
       stopped = true;
     };
-  }, [roomId, gameType]);
+  }, [roomId, gameType, onLeave]);
 
   // Track result screen state changes
   useEffect(() => {
@@ -221,9 +232,15 @@ export default function GenericGameBoard({
               <Button onClick={onLeave} variant="outline" className="w-full bg-transparent">
                 Back to Lobby
               </Button>
-              <Button onClick={() => window.location.reload()} variant="default" className="w-full">
-                Retry Connection
-              </Button>
+              {connectionError.includes("Game session has ended") ? (
+                <p className="text-sm text-gray-500 mt-2">
+                  The game has ended. You'll be automatically redirected to the lobby.
+                </p>
+              ) : (
+                <Button onClick={() => window.location.reload()} variant="default" className="w-full">
+                  Retry Connection
+                </Button>
+              )}
             </div>
           </div>
         </div>

@@ -73,7 +73,36 @@ app.get("/matchmaking/:gameType/status", async (req, res) => {
     }
     const sessionId = await redis.get(`user:${userId}:session`);
     if (sessionId) {
-      return res.json({ matched: true, roomId: sessionId });
+      // Validate that the session is still valid and accessible
+      const gameTypes = ['tictactoe', 'connect-four']; // Add more as needed
+      let validSession = false;
+      
+      for (const gt of gameTypes) {
+        const sessionKey = `${gt}:session:${sessionId}`;
+        const sessionData = await redis.get(sessionKey);
+        if (sessionData) {
+          const session = JSON.parse(sessionData);
+          // Check if this is an active session or if user is still on result screen
+          if (session.status === 'active' || 
+              (session.status === 'finished' && playersOnResultScreen.has(sessionId))) {
+            validSession = true;
+            break;
+          } else {
+            // Session is finished and no players on result screen, clean up the mapping
+            console.log(`[STATUS] Cleaning up stale session mapping for user ${userId} to ${sessionId}`);
+            await redis.del(`user:${userId}:session`);
+            break;
+          }
+        }
+      }
+      
+      if (validSession) {
+        return res.json({ matched: true, roomId: sessionId });
+      } else {
+        // Clean up invalid session mapping
+        await redis.del(`user:${userId}:session`);
+        return res.json({ matched: false });
+      }
     }
     return res.json({ matched: false });
   } catch (error) {
@@ -122,7 +151,26 @@ app.get("/matchmaking/tictactoe/status", async (req, res) => {
     }
     const sessionId = await redis.get(`user:${userId}:session`);
     if (sessionId) {
-      return res.json({ matched: true, roomId: sessionId });
+      // Validate that the session is still valid and accessible
+      const sessionKey = `tictactoe:session:${sessionId}`;
+      const sessionData = await redis.get(sessionKey);
+      if (sessionData) {
+        const session = JSON.parse(sessionData);
+        // Check if this is an active session or if user is still on result screen
+        if (session.status === 'active' || 
+            (session.status === 'finished' && playersOnResultScreen.has(sessionId))) {
+          return res.json({ matched: true, roomId: sessionId });
+        } else {
+          // Session is finished and no players on result screen, clean up the mapping
+          console.log(`[STATUS] Cleaning up stale session mapping for user ${userId} to ${sessionId}`);
+          await redis.del(`user:${userId}:session`);
+          return res.json({ matched: false });
+        }
+      } else {
+        // Session doesn't exist, clean up the mapping
+        await redis.del(`user:${userId}:session`);
+        return res.json({ matched: false });
+      }
     }
     return res.json({ matched: false });
   } catch (error) {
@@ -141,6 +189,17 @@ app.get("/game/:gameType/:roomId", async (req, res) => {
       console.log(`❌ Game not found: ${gameType}/${roomId}`);
       return res.status(404).json({ error: "Game not found" });
     }
+    
+    // Check if this is a finished game that should still be accessible
+    if (sessionData.status === 'finished' || sessionData.gameState?.winner) {
+      // Check if there are still players on the result screen
+      const playersOnResult = playersOnResultScreen.get(roomId);
+      if (!playersOnResult || playersOnResult.size === 0) {
+        console.log(`⚠️ Finished game ${roomId} has no players on result screen, may be cleaned up`);
+        // Don't return 404 immediately, let the frontend handle it gracefully
+      }
+    }
+    
     console.log(`✅ Game found: ${gameType}/${roomId}`);
     res.json(sessionData);
   } catch (error) {
@@ -409,7 +468,7 @@ app.post("/game/tictactoe/:roomId/leave", async (req, res) => {
 // Generic leave result screen endpoint for any game type
 app.post("/game/:gameType/:roomId/leave-result", async (req, res) => {
   try {
-    const { roomId } = req.params;
+    const { gameType, roomId } = req.params;
     const { userId } = req.body;
     
     const playersOnResult = playersOnResultScreen.get(roomId);
@@ -419,6 +478,10 @@ app.post("/game/:gameType/:roomId/leave-result", async (req, res) => {
     
     // Remove player from result screen
     playersOnResult.delete(userId);
+    
+    // Clean up user-to-session mapping for this user
+    await redis.del(`user:${userId}:session`);
+    console.log(`[LEAVE-RESULT] Cleaned up user mapping for ${userId} from room ${roomId}`);
     
     // If no players left on result screen, cleanup the room
     if (playersOnResult.size === 0) {
@@ -445,6 +508,10 @@ app.post("/game/tictactoe/:roomId/leave-result", async (req, res) => {
     
     // Remove player from result screen
     playersOnResult.delete(userId);
+    
+    // Clean up user-to-session mapping for this user
+    await redis.del(`user:${userId}:session`);
+    console.log(`[LEAVE-RESULT] Cleaned up user mapping for ${userId} from room ${roomId}`);
     
     // If no players left on result screen, cleanup the room
     if (playersOnResult.size === 0) {

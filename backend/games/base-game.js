@@ -35,23 +35,27 @@ export class BaseGame {
       }
     }
     
-    // LESS AGGRESSIVE CLEANUP: Only clean up if user is not on a result screen
+    // IMPROVED CLEANUP: Handle both active and finished sessions
     const cleanupUserSessionKey = `user:${userId}:session`;
     const cleanupExistingSessionId = await redis.get(cleanupUserSessionKey);
     if (cleanupExistingSessionId) {
       // Check if the session is a result screen that should be preserved
       const gameTypes = ['tictactoe', 'connect-four']; // Add more as needed
       let shouldCleanup = true;
+      let isFinishedGame = false;
       
       for (const gameType of gameTypes) {
         const sessionKey = `${gameType}:session:${cleanupExistingSessionId}`;
         const sessionData = await redis.get(sessionKey);
         if (sessionData) {
           const session = JSON.parse(sessionData);
-          // Don't cleanup if session is finished (result screen) and user might still be viewing it
+          // Check if this is a finished game (result screen)
           if (session.status === 'finished' || session.gameState?.winner) {
-            console.log(`[PRESERVE] User ${userId} is on result screen ${cleanupExistingSessionId}, preserving session`);
-            shouldCleanup = false;
+            isFinishedGame = true;
+            // For finished games, we should clean up the user mapping but preserve the session
+            // so other players can still view the result screen
+            console.log(`[FORFEIT CLEANUP] User ${userId} leaving finished game ${cleanupExistingSessionId}, cleaning up user mapping`);
+            shouldCleanup = false; // Don't delete the session, just the user mapping
             break;
           }
         }
@@ -71,6 +75,10 @@ export class BaseGame {
             break;
           }
         }
+      } else {
+        // For finished games, just remove the user mapping but preserve the session
+        console.log(`[FORFEIT CLEANUP] Removing user mapping but preserving session ${cleanupExistingSessionId} for other players`);
+        await redis.del(cleanupUserSessionKey);
       }
     }
     
