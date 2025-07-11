@@ -21,14 +21,31 @@ export async function handleMatchmaking(userId, username) {
   await redis.del(`user:${userId}:session`);
   console.log(`[HARD RESET] Deleted user-to-session mapping for user:${userId}:session`);
 
-  // Defensive: Check if user is already in a session, and if the session actually exists
+  // Defensive: Check if user is already in a session, and if the session actually exists and is valid
   const userSessionKey = `user:${userId}:session`;
   const existingSessionId = await redis.get(userSessionKey);
   if (existingSessionId) {
     const sessionExists = await redis.exists(`${sessionPrefix}${existingSessionId}`);
     if (sessionExists) {
-      console.log(`User ${userId} already in session ${existingSessionId}`);
-      return { matched: true, roomId: existingSessionId };
+      // Check if the session is still valid (not finished/cleaned up)
+      const sessionData = await redis.get(`${sessionPrefix}${existingSessionId}`);
+      if (sessionData) {
+        const session = JSON.parse(sessionData);
+        // Only return existing session if it's active (not finished)
+        if (session.status === 'active' && !session.gameState?.winner) {
+          console.log(`User ${userId} already in active session ${existingSessionId}`);
+          return { matched: true, roomId: existingSessionId };
+        } else {
+          // Session is finished, clean it up
+          console.log(`Cleaning up finished session ${existingSessionId} for user ${userId}`);
+          await redis.del(`${sessionPrefix}${existingSessionId}`);
+          await redis.del(userSessionKey);
+        }
+      } else {
+        // Session data is corrupted, clean up
+        await redis.del(userSessionKey);
+        console.log(`Cleaned up corrupted session mapping for user ${userId}`);
+      }
     } else {
       // Clean up stale mapping
       await redis.del(userSessionKey);

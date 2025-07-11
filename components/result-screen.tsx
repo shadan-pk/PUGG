@@ -110,7 +110,10 @@ export default function ResultScreen({ roomData, user, onBackToLobby }: ResultSc
       // Even if there's an error, we should still go back to lobby
     } finally {
       setIsCleaningUp(false)
-      onBackToLobby()
+      // Add a small delay to ensure cleanup is complete before going back to lobby
+      setTimeout(() => {
+        onBackToLobby()
+      }, 500)
     }
   }
 

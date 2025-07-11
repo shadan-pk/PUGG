@@ -349,8 +349,22 @@ async function cleanupResultScreen(roomId) {
       if (gameState) {
         const playerX = gameState.playerX;
         const playerO = gameState.playerO;
+        
+        // Delete user-to-session mappings
         await redis.del(`user:${playerX}:session`);
         await redis.del(`user:${playerO}:session`);
+        
+        // Also remove from queue if they're still there
+        const queueKey = 'tictactoe:queue';
+        const queue = await redis.lRange(queueKey, 0, -1);
+        for (let i = 0; i < queue.length; i++) {
+          const player = JSON.parse(queue[i]);
+          if (player.userId === playerX || player.userId === playerO) {
+            await redis.lRem(queueKey, 1, queue[i]);
+            console.log(`Removed ${player.userId} from queue during cleanup`);
+          }
+        }
+        
         console.log(`Deleted session and user mappings for room: ${roomId}`);
       }
     } else {
