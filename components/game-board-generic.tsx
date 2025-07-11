@@ -5,17 +5,16 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { useToast } from "@/hooks/use-toast"
-import { ArrowLeft, RotateCcw, Trophy, Users, Copy, Share2 } from "lucide-react"
-import { Dialog } from "@/components/ui/dialog" // If you have a dialog component, otherwise use window.confirm
+import { ArrowLeft, RotateCcw, Copy, Share2 } from "lucide-react"
+import { Dialog } from "@/components/ui/dialog"
 import ResultScreen from "./result-screen"
 
 interface GameState {
-  board: (string | null)[]
-  currentPlayer: "X" | "O"
-  winner: string | null
-  playerX: string
-  playerO: string | null
-  moves: number
+  [key: string]: any
+  board?: any
+  currentPlayer?: any
+  winner?: any
+  finished?: boolean
 }
 
 interface Player {
@@ -30,30 +29,45 @@ interface MockUser {
 }
 
 interface RoomData {
-  gameState: GameState
+  gameState: any
   players: { [key: string]: Player }
   status: string
   roomId?: string
 }
 
-export default function GameBoard({
-  roomId,
-  user,
-  onLeave,
-}: {
+interface GameRenderer {
+  renderBoard: (gameState: any, onMove: (moveData: any) => void, user: MockUser, loading: boolean) => React.ReactNode
+  renderStatus: (gameState: any, players: { [key: string]: Player }, user: MockUser) => React.ReactNode
+  renderPlayers: (gameState: any, players: { [key: string]: Player }, user: MockUser) => React.ReactNode
+  isGameFinished: (gameState: any) => boolean
+}
+
+interface GenericGameBoardProps {
+  gameType: string
   roomId: string
   user: MockUser
   onLeave: () => void
-}) {
+  onResultScreenEnter?: () => void
+  onResultScreenLeave?: () => void
+  gameRenderer: GameRenderer
+}
+
+export default function GenericGameBoard({
+  gameType,
+  roomId,
+  user,
+  onLeave,
+  onResultScreenEnter,
+  onResultScreenLeave,
+  gameRenderer
+}: GenericGameBoardProps) {
   const [roomData, setRoomData] = useState<RoomData | null>(null)
   const [loading, setLoading] = useState(false)
   const [connectionError, setConnectionError] = useState<string | null>(null)
+  const [wasOnResultScreen, setWasOnResultScreen] = useState(false)
   const { toast } = useToast()
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const [leaving, setLeaving] = useState(false);
-
-  // Extract game type from room ID (format: gameType-timestamp-random)
-  const gameType = roomId.split('-')[0];
 
   // Poll game state every second
   useEffect(() => {
@@ -61,17 +75,28 @@ export default function GameBoard({
     async function pollGame() {
       while (!stopped) {
         try {
-          const res = await fetch(`http://localhost:3001/game/tictactoe/${roomId}`);
+          const res = await fetch(`http://localhost:3001/game/${gameType}/${roomId}`);
           if (res.ok) {
             const data = await res.json();
             data.roomId = roomId; // Add roomId to the data
             setRoomData(data);
             setConnectionError(null);
+          } else if (res.status === 404) {
+            // Game not found - this could be because it was cleaned up
+            setConnectionError("Game session has ended. Returning to lobby...");
+            // Auto-return to lobby after a short delay
+            setTimeout(() => {
+              if (!stopped) {
+                onLeave();
+              }
+            }, 2000);
+            break; // Stop polling
           } else {
-            setConnectionError("Room not found");
+            setConnectionError("Failed to fetch game state");
           }
         } catch (error) {
-          setConnectionError("Failed to fetch game state");
+          console.error("Polling error:", error);
+          setConnectionError("Failed to connect to game server");
         }
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
@@ -80,16 +105,33 @@ export default function GameBoard({
     return () => {
       stopped = true;
     };
-  }, [roomId]);
+  }, [roomId, gameType, onLeave]);
 
-  const makeMove = async (index: number) => {
-    if (!roomData || roomData.gameState.board[index] || roomData.gameState.winner) return
+  // Track result screen state changes
+  useEffect(() => {
+    if (roomData && gameRenderer.isGameFinished(roomData.gameState)) {
+      if (!wasOnResultScreen) {
+        console.log("🎭 Game finished, entering result screen")
+        setWasOnResultScreen(true)
+        onResultScreenEnter?.()
+      }
+    } else {
+      if (wasOnResultScreen) {
+        console.log("🎭 Game no longer finished, leaving result screen")
+        setWasOnResultScreen(false)
+        onResultScreenLeave?.()
+      }
+    }
+  }, [roomData, gameRenderer, wasOnResultScreen, onResultScreenEnter, onResultScreenLeave])
+
+  const makeMove = async (moveData: any) => {
+    if (!roomData || gameRenderer.isGameFinished(roomData.gameState)) return
     setLoading(true)
     try {
-      const res = await fetch(`http://localhost:3001/game/tictactoe/${roomId}/move`, {
+      const res = await fetch(`http://localhost:3001/game/${gameType}/${roomId}/move`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: user.uid, index }),
+        body: JSON.stringify({ userId: user.uid, ...moveData }),
       });
       if (res.ok) {
         const data = await res.json();
@@ -138,8 +180,8 @@ export default function GameBoard({
 
   const shareGame = async () => {
     const shareData = {
-      title: "Join my Tic-Tac-Toe game!",
-      text: `Join my online Tic-Tac-Toe game. Room ID: ${roomId.slice(-6)}`,
+      title: "Join my game!",
+      text: `Join my online game. Room ID: ${roomId.slice(-6)}`,
       url: window.location.href,
     }
     try {
@@ -160,7 +202,7 @@ export default function GameBoard({
   const confirmLeave = async () => {
     setLeaving(true);
     try {
-      await fetch(`http://localhost:3001/game/tictactoe/${roomId}/leave`, {
+      await fetch(`http://localhost:3001/game/${gameType}/${roomId}/leave`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId: user.uid }),
@@ -170,6 +212,10 @@ export default function GameBoard({
     } finally {
       setLeaving(false);
       setShowLeaveConfirm(false);
+      // Call result screen leave callback if we were on result screen
+      if (wasOnResultScreen) {
+        onResultScreenLeave?.()
+      }
       onLeave();
     }
   };
@@ -186,9 +232,15 @@ export default function GameBoard({
               <Button onClick={onLeave} variant="outline" className="w-full bg-transparent">
                 Back to Lobby
               </Button>
-              <Button onClick={() => window.location.reload()} variant="default" className="w-full">
-                Retry Connection
-              </Button>
+              {connectionError.includes("Game session has ended") ? (
+                <p className="text-sm text-gray-500 mt-2">
+                  The game has ended. You'll be automatically redirected to the lobby.
+                </p>
+              ) : (
+                <Button onClick={() => window.location.reload()} variant="default" className="w-full">
+                  Retry Connection
+                </Button>
+              )}
             </div>
           </div>
         </div>
@@ -227,23 +279,22 @@ export default function GameBoard({
       </div>
     )
   }
-  const playerXName =
-    gameState.playerX && players?.[gameState.playerX]?.name
-      ? players[gameState.playerX].name
-      : "Player X"
-  const playerOName =
-    gameState.playerO && players?.[gameState.playerO]?.name
-      ? players[gameState.playerO].name
-      : gameState.playerO
-        ? "Player O"
-        : "Waiting..."
-  const isPlayerX = gameState.playerX === user.uid
-  const isPlayerO = gameState.playerO === user.uid
-  const currentPlayerName = gameState.currentPlayer === "X" ? playerXName : playerOName
 
   // Show result screen when game ends
-  if (roomData && roomData.gameState && roomData.gameState.winner) {
-    return <ResultScreen roomData={roomData} user={user} onBackToLobby={onLeave} />
+  if (gameRenderer.isGameFinished(gameState)) {
+    // Ensure roomId is set for ResultScreen
+    const resultRoomData = { ...roomData, roomId }
+    
+    // Create a proper callback that handles result screen state
+    const handleBackToLobbyFromResult = () => {
+      console.log("🎭 User leaving result screen via back to lobby")
+      // Call result screen leave callback to reset state
+      onResultScreenLeave?.()
+      // Then call the main leave function
+      onLeave()
+    }
+    
+    return <ResultScreen roomData={resultRoomData} user={user} onBackToLobby={handleBackToLobbyFromResult} />
   }
 
   return (
@@ -256,7 +307,7 @@ export default function GameBoard({
             Leave Game
           </Button>
           <div className="text-center">
-            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">🎮 Tic-Tac-Toe</h1>
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">🎮 {gameRenderer.constructor.name}</h1>
             <div className="flex items-center justify-center space-x-2">
               <p className="text-sm text-gray-600 dark:text-gray-400">Room: {roomId.slice(-6)}</p>
               <Button onClick={copyRoomId} variant="ghost" size="sm" className="h-6 w-6 p-0">
@@ -277,73 +328,14 @@ export default function GameBoard({
         </div>
 
         {/* Players Info */}
-        <div className="grid grid-cols-2 gap-4">
-          <Card className={`${isPlayerX ? "ring-2 ring-blue-500" : ""}`}>
-            <CardContent className="p-4">
-              <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center text-white font-bold">
-                  X
-                </div>
-                <div>
-                  <p className="font-medium">{playerXName}</p>
-                  <p className="text-sm text-gray-500">Player X</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className={`${isPlayerO ? "ring-2 ring-purple-500" : ""}`}>
-            <CardContent className="p-4">
-              <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 bg-purple-600 rounded-full flex items-center justify-center text-white font-bold">
-                  O
-                </div>
-                <div>
-                  <p className="font-medium">{playerOName}</p>
-                  <p className="text-sm text-gray-500">Player O</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+        {gameRenderer.renderPlayers(gameState, players, user)}
 
         {/* Game Board */}
-        <div className="grid grid-cols-3 gap-2 bg-slate-800 rounded-lg p-4">
-          {gameState.board.map((cell, idx) => (
-            <button
-              key={idx}
-              className={`w-20 h-20 text-3xl font-bold rounded-lg border-2 flex items-center justify-center transition-all duration-150
-                ${cell === "X" ? "text-blue-500 border-blue-400" : cell === "O" ? "text-purple-500 border-purple-400" : "border-slate-700 hover:border-blue-400 hover:bg-slate-700"}
-                ${gameState.winner && cell === gameState.winner ? "bg-green-100" : ""}
-              `}
-              disabled={!!cell || !!gameState.winner || loading || !isPlayerX && !isPlayerO}
-              onClick={() => makeMove(idx)}
-            >
-              {cell}
-            </button>
-          ))}
-        </div>
+        {gameRenderer.renderBoard(gameState, makeMove, user, loading)}
 
         {/* Game Status */}
         <div className="text-center mt-4">
-          {gameState.winner ? (
-            gameState.winner === "draw" ? (
-              <div className="text-lg font-bold text-yellow-500">🤝 It's a draw!</div>
-            ) : (
-              <div className="text-lg font-bold text-green-600">🎉 {gameState.winner === "X" ? playerXName : playerOName} wins!</div>
-            )
-          ) : (
-            <div className="text-md text-slate-300">
-              {isPlayerX || isPlayerO ? (
-                gameState.currentPlayer === (isPlayerX ? "X" : "O") ? (
-                  <span>Your turn ({gameState.currentPlayer})</span>
-                ) : (
-                  <span>Waiting for opponent...</span>
-                )
-              ) : (
-                <span>Spectating</span>
-              )}
-            </div>
-          )}
+          {gameRenderer.renderStatus(gameState, players, user)}
         </div>
       </div>
       {showLeaveConfirm && (
@@ -360,4 +352,4 @@ export default function GameBoard({
       )}
     </div>
   );
-}
+} 

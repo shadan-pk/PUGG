@@ -1,593 +1,581 @@
 "use client"
 
-import { useState, useEffect } from "react"
-import {
-  collection,
-  addDoc,
-  onSnapshot,
-  doc,
-  updateDoc,
-  deleteDoc,
-  query,
-  orderBy,
-  serverTimestamp,
-  getDocs,
-} from "firebase/firestore"
-import { db, isFirebaseConfigured } from "@/lib/firebase"
+import { useState, useEffect, useCallback } from "react"
+import { signOut } from "firebase/auth"
+import { auth } from "@/lib/firebase"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Alert, AlertDescription } from "@/components/ui/alert"
 import { useToast } from "@/hooks/use-toast"
-import GameBoard from "@/components/game-board"
-import { Users, Plus, Trophy, Clock, Gamepad2, Wifi, WifiOff, RefreshCw, AlertTriangle, LogOut } from "lucide-react"
+import GenericGameBoard from "@/components/game-board-generic"
+import { TicTacToeRenderer } from "@/components/game-renderers/tictactoe-renderer"
+import { ConnectFourRenderer } from "@/components/game-renderers/connect-four-renderer"
+import { matchmakingService } from "@/lib/matchmaking" // Use singleton instance
+import { PresenceService, type UserPresence } from "@/lib/presence"
+import { Users, Trophy, LogOut, Target, Crown, Zap, Clock, Star, X, Search, AlertCircle } from "lucide-react"
 
-interface User {
+interface UserProfile {
   uid: string
-  email: string
+  username: string
   displayName: string
+  email: string
+  photoURL: string
+  stats: {
+    gamesPlayed: number
+    gamesWon: number
+    winRate: number
+    rank: string
+    xp: number
+    level: number
+  }
+  preferences: {
+    gameMode: string
+    notifications: boolean
+  }
 }
 
-interface GameRoom {
-  id: string
+interface AvailableGame {
+  type: string
   name: string
-  players: { [key: string]: { name: string; email: string } }
-  status: "waiting" | "playing" | "finished"
-  createdAt: any
-  gameState: {
-    board: (string | null)[]
-    currentPlayer: "X" | "O"
-    winner: string | null
-    playerX: string
-    playerO: string | null
-    moves: number
-  }
+  minPlayers: number
+  maxPlayers: number
 }
 
 interface GameLobbyProps {
-  user: User
-  onLogout: () => void
+  userProfile: UserProfile
 }
 
-export default function GameLobby({ user, onLogout }: GameLobbyProps) {
-  const [rooms, setRooms] = useState<GameRoom[]>([])
-  const [currentRoom, setCurrentRoom] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "error" | "demo">("connecting")
-  const [retryCount, setRetryCount] = useState(0)
+export default function GameLobby({ userProfile }: GameLobbyProps) {
+  const [availableGames, setAvailableGames] = useState<AvailableGame[]>([])
+  const [selectedGame, setSelectedGame] = useState<string>("")
+  const [matchmaking, setMatchmaking] = useState(false)
+  const [currentMatch, setCurrentMatch] = useState<string | null>(null)
+  const [lastMatchmakingStart, setLastMatchmakingStart] = useState<number>(0)
+  const [onlineUsers, setOnlineUsers] = useState<UserPresence[]>([])
+  const [presenceService] = useState(() => new PresenceService(userProfile.uid, userProfile.username))
+  const [matchmakingUnsubscribe, setMatchmakingUnsubscribe] = useState<(() => void) | null>(null)
+  const [resultScreenCooldown, setResultScreenCooldown] = useState<number>(0)
+  const [isOnResultScreen, setIsOnResultScreen] = useState(false)
   const { toast } = useToast()
 
-  // Function to load rooms manually (fallback)
-  const loadRoomsManually = async () => {
-    try {
-      console.log("🔄 Loading rooms manually...")
-      const roomsRef = collection(db, "rooms")
-      const snapshot = await getDocs(roomsRef)
+  // Check if user can enter matchmaking
+  const canEnterMatchmaking = !isOnResultScreen && resultScreenCooldown === 0
 
-      const roomList = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      })) as GameRoom[]
+  // Fetch available games from backend
+  useEffect(() => {
+    const fetchAvailableGames = async () => {
+      try {
+        const response = await fetch('http://localhost:3001/games');
+        if (response.ok) {
+          const games = await response.json();
+          setAvailableGames(games);
+          // Set first available game as default
+          if (games.length > 0 && !selectedGame) {
+            setSelectedGame(games[0].type);
+          }
+        } else {
+          console.error('Failed to fetch available games');
+        }
+      } catch (error) {
+        console.error('Error fetching available games:', error);
+      }
+    };
 
-      const activeRooms = roomList.filter((room) => room.status !== "finished")
-      console.log("📋 Manually loaded rooms:", activeRooms.length)
+    fetchAvailableGames();
+  }, [selectedGame]);
 
-      setRooms(activeRooms)
-      setConnectionStatus("connected")
-
-      toast({
-        title: "🔄 Rooms Loaded",
-        description: `Found ${activeRooms.length} active games`,
-      })
-    } catch (error) {
-      console.error("❌ Manual room loading failed:", error)
-      toast({
-        title: "Load Failed",
-        description: "Could not load rooms manually",
-        variant: "destructive",
-      })
+  // Handle match found callback
+  const handleMatchFound = useCallback((roomId: string) => {
+    console.log(`🎉 Match found! Room ID: ${roomId}`)
+    console.log(`🔍 Previous currentMatch: ${currentMatch}`)
+    console.log(`⏰ Last matchmaking start: ${lastMatchmakingStart}`)
+    
+    // Extract timestamp from room ID to validate it's a fresh match
+    const parts = roomId.split('-');
+    if (parts.length >= 2) {
+      const roomTimestamp = parseInt(parts[parts.length - 2]);
+      const timeDiff = roomTimestamp - lastMatchmakingStart;
+      
+      // If the room was created more than 10 seconds before we started matchmaking, ignore it
+      if (timeDiff < -10000) {
+        console.log(`⚠️ Ignoring old room ID: ${roomId} (created ${timeDiff}ms before matchmaking start)`);
+        return;
+      }
     }
-  }
+    
+    setCurrentMatch(roomId)
+    setMatchmaking(false)
+    setIsOnResultScreen(false) // Reset result screen state
+    setResultScreenCooldown(0) // Reset cooldown
+    presenceService.updateStatus("in-game", roomId)
+    
+    // Clean up matchmaking listener
+    if (matchmakingUnsubscribe) {
+      matchmakingUnsubscribe()
+      setMatchmakingUnsubscribe(null)
+    }
+    
+    toast({
+      title: "🎉 Match Found!",
+      description: "Opponent found! Starting game...",
+    })
+  }, [presenceService, matchmakingUnsubscribe, toast, currentMatch, lastMatchmakingStart])
 
   useEffect(() => {
-    if (!isFirebaseConfigured) {
-      setConnectionStatus("demo")
-      toast({
-        title: "🎭 Demo Mode",
-        description: "Add Firebase config to .env.local for real multiplayer!",
-      })
-      return
-    }
+    // Set user online when component mounts
+    presenceService.goOnline()
 
-    console.log("🔥 Setting up Firestore listeners... (attempt", retryCount + 1, ")")
+    // Listen to online users
+    const unsubscribePresence = PresenceService.listenToOnlineUsers(setOnlineUsers)
 
-    let unsubscribe: (() => void) | null = null
-
-    const setupListener = async () => {
-      try {
-        // Test basic Firestore connection first
-        console.log("🧪 Testing Firestore connection...")
-        const testRef = collection(db, "rooms")
-
-        // Try a simple query first
-        const testSnapshot = await getDocs(testRef)
-        console.log("✅ Firestore connection test successful, found", testSnapshot.docs.length, "documents")
-
-        // Now set up the real-time listener
-        console.log("👂 Setting up real-time listener...")
-        const q = query(testRef, orderBy("createdAt", "desc"))
-
-        unsubscribe = onSnapshot(
-          q,
-          (snapshot) => {
-            console.log("📡 Firestore real-time update received:", snapshot.docs.length, "rooms")
-            setConnectionStatus("connected")
-
-            const roomList = snapshot.docs.map((doc) => ({
-              id: doc.id,
-              ...doc.data(),
-            })) as GameRoom[]
-
-            // Filter out finished games
-            const activeRooms = roomList.filter((room) => room.status !== "finished")
-            console.log("🎮 Active rooms:", activeRooms.length)
-            setRooms(activeRooms)
-
-            // Show success message only on first connection
-            if (retryCount === 0) {
-              toast({
-                title: "🔥 Connected to Firestore!",
-                description: "Real-time multiplayer is now active.",
-              })
-            }
-          },
-          (error) => {
-            console.error("❌ Firestore real-time listener error:", error)
-            setConnectionStatus("error")
-
-            // Try manual loading as fallback
-            console.log("🔄 Attempting manual room loading as fallback...")
-            loadRoomsManually()
-
-            toast({
-              title: "Real-time Connection Issue",
-              description: "Using manual refresh mode. Click 'Refresh Rooms' to update.",
-              variant: "destructive",
-            })
-          },
-        )
-      } catch (error) {
-        console.error("❌ Firestore setup error:", error)
-        setConnectionStatus("error")
-
-        // Try manual loading as fallback
-        console.log("🔄 Setup failed, trying manual loading...")
-        await loadRoomsManually()
-
-        toast({
-          title: "Connection Setup Failed",
-          description: "Using manual mode. Click 'Refresh Rooms' to update.",
-          variant: "destructive",
-        })
-      }
-    }
-
-    // Start the setup
-    setupListener()
-
-    // Cleanup function
+    // Cleanup when component unmounts
     return () => {
-      console.log("🔇 Cleaning up Firestore listener...")
-      if (unsubscribe) {
-        unsubscribe()
+      presenceService.goOffline()
+      unsubscribePresence()
+      
+      // Clean up matchmaking
+      if (matchmakingUnsubscribe) {
+        matchmakingUnsubscribe()
+      }
+      
+      // Clean up matchmaking service
+      if (matchmakingService && typeof matchmakingService.cleanup === 'function') {
+        matchmakingService.cleanup()
       }
     }
-  }, [toast, retryCount])
+  }, [presenceService, matchmakingUnsubscribe])
 
-  const createRoom = async () => {
-    if (!isFirebaseConfigured) {
-      toast({
-        title: "Demo Mode",
-        description: "Add Firebase config to create real rooms!",
-        variant: "destructive",
+  // Handle result screen state changes
+  const handleResultScreenEnter = useCallback(() => {
+    console.log("🎭 User entered result screen")
+    setIsOnResultScreen(true)
+  }, [])
+
+  const handleResultScreenLeave = useCallback(() => {
+    console.log("🎭 User left result screen, starting cooldown")
+    setIsOnResultScreen(false)
+    setResultScreenCooldown(5) // 5 second cooldown
+    
+    // Start cooldown timer
+    const cooldownInterval = setInterval(() => {
+      setResultScreenCooldown((prev) => {
+        if (prev <= 1) {
+          clearInterval(cooldownInterval)
+          return 0
+        }
+        return prev - 1
       })
-      return
-    }
+    }, 1000)
+  }, [])
 
-    console.log("🎮 Creating room for user:", user.displayName)
-    setLoading(true)
-
-    try {
-      const roomData = {
-        name: `${user.displayName}'s Game`,
-        players: {
-          [user.uid]: {
-            name: user.displayName,
-            email: user.email,
-          },
-        },
-        status: "waiting",
-        createdAt: serverTimestamp(),
-        gameState: {
-          board: Array(9).fill(null),
-          currentPlayer: "X",
-          winner: null,
-          playerX: user.uid,
-          playerO: null,
-          moves: 0,
-        },
-      }
-
-      console.log("📤 Adding room to Firestore:", roomData)
-      const docRef = await addDoc(collection(db, "rooms"), roomData)
-      console.log("✅ Room created with ID:", docRef.id)
-
-      setCurrentRoom(docRef.id)
-      toast({
-        title: "🎉 Room Created!",
-        description: "Share the room ID with friends to join your game.",
-      })
-    } catch (error) {
-      console.error("❌ Error creating room:", error)
-      toast({
-        title: "Error",
-        description: `Failed to create room: ${error}`,
-        variant: "destructive",
-      })
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const joinRoom = async (roomId: string) => {
-    if (!isFirebaseConfigured) {
-      toast({
-        title: "Demo Mode",
-        description: "Add Firebase config to join real rooms!",
-        variant: "destructive",
-      })
-      return
-    }
-
-    console.log("🚪 Joining room:", roomId)
-    setLoading(true)
-
-    try {
-      const room = rooms.find((r) => r.id === roomId)
-      if (!room) {
+  const handleStartMatch = async () => {
+    // Prevent matchmaking if on result screen or in cooldown
+    if (!canEnterMatchmaking) {
+      if (isOnResultScreen) {
         toast({
-          title: "Room Not Found",
-          description: "This room no longer exists.",
+          title: "⚠️ Still on Result Screen",
+          description: "Please wait for the result screen to finish before starting a new match.",
           variant: "destructive",
         })
-        return
-      }
-
-      const playerCount = Object.keys(room.players).length
-      if (playerCount >= 2) {
+      } else if (resultScreenCooldown > 0) {
         toast({
-          title: "Room Full",
-          description: "This room already has 2 players.",
+          title: "⏳ Cooldown Active",
+          description: `Please wait ${resultScreenCooldown} seconds before starting a new match.`,
           variant: "destructive",
         })
-        return
       }
-
-      if (Object.keys(room.players).includes(user.uid)) {
-        setCurrentRoom(roomId)
-        return
-      }
-
-      // Update room with new player
-      const roomRef = doc(db, "rooms", roomId)
-      await updateDoc(roomRef, {
-        [`players.${user.uid}`]: {
-          name: user.displayName,
-          email: user.email,
-        },
-        "gameState.playerO": user.uid,
-        status: "playing",
-      })
-
-      setCurrentRoom(roomId)
-      toast({
-        title: "🎮 Joined Game!",
-        description: "Game is starting now!",
-      })
-    } catch (error) {
-      console.error("❌ Error joining room:", error)
-      toast({
-        title: "Error",
-        description: `Failed to join room: ${error}`,
-        variant: "destructive",
-      })
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const leaveRoom = async () => {
-    if (!currentRoom || !isFirebaseConfigured) {
-      setCurrentRoom(null)
       return
     }
 
-    console.log("🚪 Leaving room:", currentRoom)
+    // Prevent multiple matchmaking attempts
+    if (matchmaking || matchmakingService.isMatchmakingInProgress(userProfile.uid)) {
+      console.log("⚠️ Matchmaking already in progress")
+      return
+    }
+
+    if (!selectedGame) {
+      toast({
+        title: "No Game Selected",
+        description: "Please select a game to play.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    setMatchmaking(true)
+    setLastMatchmakingStart(Date.now())
+
     try {
-      const room = rooms.find((r) => r.id === currentRoom)
-      if (!room) return
+      console.log("🎮 Starting matchmaking for:", selectedGame)
 
-      const roomRef = doc(db, "rooms", currentRoom)
+      // Start listening for match updates first
+      const unsubscribe = matchmakingService.listenForMatch(userProfile.uid, selectedGame, handleMatchFound)
+      setMatchmakingUnsubscribe(() => unsubscribe)
 
-      // If only one player, delete the room
-      if (Object.keys(room.players).length <= 1) {
-        await deleteDoc(roomRef)
-        console.log("🗑️ Room deleted (no players left)")
+      // Then call the matchmaking API
+      const result = await matchmakingService.joinMatchmaking(userProfile.uid, userProfile.username, selectedGame)
+
+      if (result.matched && result.roomId) {
+        // Immediate match found
+        handleMatchFound(result.roomId)
       } else {
-        // Remove player and reset game
-        const updatedPlayers = { ...room.players }
-        delete updatedPlayers[user.uid]
-
-        await updateDoc(roomRef, {
-          players: updatedPlayers,
-          "gameState.board": Array(9).fill(null),
-          "gameState.currentPlayer": "X",
-          "gameState.winner": null,
-          "gameState.playerO": null,
-          "gameState.moves": 0,
-          status: "waiting",
+        // Waiting for opponent
+        const gameName = availableGames.find(g => g.type === selectedGame)?.name || selectedGame;
+        toast({
+          title: "🔍 Searching for Opponent",
+          description: `Looking for players in ${gameName}...`,
         })
+        // Keep matchmaking state true and listener active
+      }
+    } catch (error: any) {
+      console.error("❌ Matchmaking error:", error)
+      setMatchmaking(false)
+      
+      // Clean up listener on error
+      if (matchmakingUnsubscribe) {
+        matchmakingUnsubscribe()
+        setMatchmakingUnsubscribe(null)
       }
 
-      setCurrentRoom(null)
       toast({
-        title: "👋 Left Game",
-        description: "You have left the game room.",
-      })
-    } catch (error) {
-      console.error("❌ Error leaving room:", error)
-      toast({
-        title: "Error",
-        description: "Failed to leave room properly.",
+        title: "Matchmaking Failed",
+        description: error.message || "Could not start matchmaking. Please try again.",
         variant: "destructive",
       })
     }
   }
 
-  const refreshConnection = () => {
-    console.log("🔄 Refreshing connection...")
-    setConnectionStatus("connecting")
-    setRetryCount((prev) => prev + 1)
+  const handleCancelMatchmaking = async () => {
+    try {
+      // Cancel matchmaking on backend
+      await matchmakingService.cancelMatchmaking(userProfile.uid, selectedGame)
+      
+      // Clean up listener
+      if (matchmakingUnsubscribe) {
+        matchmakingUnsubscribe()
+        setMatchmakingUnsubscribe(null)
+      }
+
+      setMatchmaking(false)
+
+      toast({
+        title: "❌ Matchmaking Cancelled",
+        description: "You can start a new search anytime.",
+      })
+    } catch (error) {
+      console.error("❌ Error cancelling matchmaking:", error)
+      // Still update UI state even if backend call fails
+      setMatchmaking(false)
+      if (matchmakingUnsubscribe) {
+        matchmakingUnsubscribe()
+        setMatchmakingUnsubscribe(null)
+      }
+    }
   }
 
-  const refreshRooms = () => {
-    console.log("🔄 Manual room refresh...")
-    loadRoomsManually()
+  const handleLeaveGame = async () => {
+    console.log(`🚪 Leaving game, clearing currentMatch: ${currentMatch}`)
+    
+    // Reset result screen state when leaving game
+    setIsOnResultScreen(false)
+    setResultScreenCooldown(0)
+    
+    setCurrentMatch(null)
+    await presenceService.updateStatus("online")
+
+    toast({
+      title: "👋 Left Game",
+      description: "You're back in the lobby.",
+    })
   }
 
-  if (currentRoom) {
-    return <GameBoard roomId={currentRoom} user={user} onLeave={leaveRoom} />
+  const handleLogout = async () => {
+    try {
+      // Cancel any active matchmaking
+      if (matchmaking) {
+        await matchmakingService.cancelMatchmaking(userProfile.uid, selectedGame)
+      }
+
+      // Clean up listener
+      if (matchmakingUnsubscribe) {
+        matchmakingUnsubscribe()
+      }
+
+      // Clean up services
+      if (matchmakingService && typeof matchmakingService.cleanup === 'function') {
+        matchmakingService.cleanup()
+      }
+      await presenceService.goOffline()
+      await signOut(auth)
+
+      toast({
+        title: "👋 See you later!",
+        description: "You have been signed out successfully.",
+      })
+    } catch (error) {
+      console.error("❌ Logout error:", error)
+    }
+  }
+
+  if (currentMatch) {
+    console.log(`🎮 Rendering game board for currentMatch: ${currentMatch}`);
+    // Extract game type from room ID (format: gameType-timestamp-random)
+    console.log("🔍 Room ID:", currentMatch);
+    
+    // Handle multi-word game types like "connect-four"
+    // Split by '-' and take all parts except the last two (timestamp and random)
+    const parts = currentMatch.split('-');
+    const gameType = parts.slice(0, -2).join('-');
+    console.log("🎮 Extracted game type:", gameType);
+    
+    // Get the appropriate renderer based on game type
+    let gameRenderer;
+    switch (gameType) {
+      case 'tictactoe':
+        gameRenderer = new TicTacToeRenderer();
+        break;
+      case 'connect-four':
+        gameRenderer = new ConnectFourRenderer();
+        break;
+      default:
+        console.warn("⚠️ Unknown game type:", gameType, "falling back to Tic Tac Toe renderer");
+        // Fallback to Tic Tac Toe renderer for unknown game types
+        gameRenderer = new TicTacToeRenderer();
+        break;
+    }
+    
+    return (
+      <GenericGameBoard 
+        gameType={gameType}
+        roomId={currentMatch} 
+        user={userProfile} 
+        onLeave={handleLeaveGame}
+        onResultScreenEnter={handleResultScreenEnter}
+        onResultScreenLeave={handleResultScreenLeave}
+        gameRenderer={gameRenderer}
+      />
+    )
   }
 
   return (
-    <div className="min-h-screen p-4">
-      <div className="max-w-4xl mx-auto space-y-6">
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-4">
-            <div className="p-2 bg-blue-600 rounded-lg">
-              <Gamepad2 className="h-6 w-6 text-white" />
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-blue-950 to-slate-900">
+      {/* Header */}
+      <div className="border-b border-slate-800 bg-slate-950/50 backdrop-blur supports-[backdrop-filter]:bg-slate-950/50">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex justify-between items-center py-4">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center">
+                <Crown className="w-6 h-6 text-white" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+                  Game Arena
+                </h1>
+                <p className="text-slate-400 text-sm">Choose your battle</p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Tic-Tac-Toe Online</h1>
-              <p className="text-gray-600 dark:text-gray-400">Welcome, {user.displayName}!</p>
+            
+            <div className="flex items-center space-x-4">
+              <div className="flex items-center space-x-2 bg-slate-800/50 rounded-lg px-3 py-2">
+                <Users className="w-4 h-4 text-green-400" />
+                <span className="text-sm font-medium text-slate-300">
+                  {onlineUsers.length} online
+                </span>
+              </div>
+              
+              <Button
+                onClick={handleLogout}
+                variant="ghost"
+                size="sm"
+                className="text-slate-400 hover:text-white hover:bg-slate-800"
+              >
+                <LogOut className="w-4 h-4 mr-2" />
+                Logout
+              </Button>
             </div>
           </div>
-          <div className="flex items-center space-x-2">
-            <Badge
-              variant={
-                connectionStatus === "connected"
-                  ? "default"
-                  : connectionStatus === "demo"
-                    ? "secondary"
-                    : connectionStatus === "connecting"
-                      ? "secondary"
-                      : "destructive"
-              }
-            >
-              {connectionStatus === "connected" && <Wifi className="h-3 w-3 mr-1" />}
-              {connectionStatus === "demo" && <AlertTriangle className="h-3 w-3 mr-1" />}
-              {connectionStatus === "error" && <WifiOff className="h-3 w-3 mr-1" />}
-              {connectionStatus === "connecting" && <RefreshCw className="h-3 w-3 mr-1 animate-spin" />}
-              {connectionStatus === "connected"
-                ? "🔥 Firestore Connected"
-                : connectionStatus === "demo"
-                  ? "Demo Mode"
-                  : connectionStatus === "connecting"
-                    ? "Connecting..."
-                    : "Manual Mode"}
-            </Badge>
-            {connectionStatus === "error" && (
-              <Button onClick={refreshConnection} variant="outline" size="sm">
-                <RefreshCw className="h-4 w-4 mr-1" />
-                Retry
-              </Button>
-            )}
-            {(connectionStatus === "error" || connectionStatus === "connected") && (
-              <Button onClick={refreshRooms} variant="outline" size="sm">
-                <RefreshCw className="h-4 w-4 mr-1" />
-                Refresh Rooms
-              </Button>
-            )}
-            <Button onClick={onLogout} variant="outline" size="sm">
-              <LogOut className="h-4 w-4 mr-2" />
-              Logout
-            </Button>
-          </div>
         </div>
+      </div>
 
-        {/* Status Alert */}
-        {(connectionStatus === "error" || connectionStatus === "demo") && (
-          <Alert
-            className={
-              connectionStatus === "error" ? "border-orange-200 bg-orange-50" : "border-yellow-200 bg-yellow-50"
-            }
-          >
-            <AlertTriangle className="h-4 w-4" />
-            <AlertDescription>
-              {connectionStatus === "error" ? (
-                <>
-                  <strong>Manual Mode Active:</strong> Real-time updates are disabled. Room creation and joining still
-                  work.
-                  <br />
-                  <small>Click "Refresh Rooms" to see new games, or "Retry" to restore real-time updates.</small>
-                </>
-              ) : (
-                <>
-                  <strong>Demo Mode Active:</strong> Add Firebase configuration to .env.local for real-time multiplayer.
-                  <br />
-                  <small>Fill in your Firebase config to enable cross-device gameplay!</small>
-                </>
-              )}
-            </AlertDescription>
-          </Alert>
-        )}
-
-        {/* Stats Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <Card>
-            <CardContent className="p-4">
-              <div className="flex items-center space-x-2">
-                <Users className="h-5 w-5 text-blue-600" />
-                <div>
-                  <p className="text-sm font-medium">Active Rooms</p>
-                  <p className="text-2xl font-bold">{rooms.length}</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-4">
-              <div className="flex items-center space-x-2">
-                <Clock className="h-5 w-5 text-green-600" />
-                <div>
-                  <p className="text-sm font-medium">Online Players</p>
-                  <p className="text-2xl font-bold">
-                    {rooms.reduce((acc, room) => acc + Object.keys(room.players).length, 0)}
-                  </p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-4">
-              <div className="flex items-center space-x-2">
-                <Trophy className="h-5 w-5 text-yellow-600" />
-                <div>
-                  <p className="text-sm font-medium">Games Playing</p>
-                  <p className="text-2xl font-bold">{rooms.filter((room) => room.status === "playing").length}</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Create Room */}
-        <Card>
-          <CardHeader>
-            <CardTitle>🎮 Create New Game</CardTitle>
-            <CardDescription>
-              Start a new game and share the room ID with friends to join
-              {connectionStatus === "demo" && " (Add Firebase config for real multiplayer)"}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Button onClick={createRoom} disabled={loading} className="w-full sm:w-auto">
-              <Plus className="h-4 w-4 mr-2" />
-              {loading ? "Creating..." : "Create Room"}
-            </Button>
-          </CardContent>
-        </Card>
-
-        {/* Available Rooms */}
-        <Card>
-          <CardHeader>
-            <CardTitle>🎯 Available Games ({rooms.length})</CardTitle>
-            <CardDescription>
-              Join an existing game room
-              {connectionStatus === "error" && " (Manual mode - click Refresh Rooms to update)"}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {connectionStatus === "connecting" ? (
-              <div className="text-center py-8">
-                <RefreshCw className="h-8 w-8 text-blue-600 mx-auto mb-4 animate-spin" />
-                <p className="text-gray-500 dark:text-gray-400">Connecting to Firestore...</p>
-              </div>
-            ) : connectionStatus === "demo" ? (
-              <div className="text-center py-8">
-                <AlertTriangle className="h-12 w-12 text-yellow-500 mx-auto mb-4" />
-                <p className="text-gray-500 dark:text-gray-400">Demo Mode Active</p>
-                <p className="text-sm text-gray-400 dark:text-gray-500">
-                  Add Firebase configuration to see and join real rooms!
-                </p>
-              </div>
-            ) : rooms.length === 0 ? (
-              <div className="text-center py-8">
-                <Users className="h-12 w-12 text-gray-400 mx-auto mb-4" />
-                <p className="text-gray-500 dark:text-gray-400">No active games found</p>
-                <p className="text-sm text-gray-400 dark:text-gray-500">Create a new room to start playing!</p>
-                {connectionStatus === "error" && (
-                  <Button onClick={refreshRooms} variant="outline" size="sm" className="mt-2 bg-transparent">
-                    <RefreshCw className="h-4 w-4 mr-1" />
-                    Refresh Rooms
-                  </Button>
-                )}
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {rooms.map((room) => (
+      {/* Main Content */}
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          {/* Game Selection */}
+          <div className="lg:col-span-2">
+            <Card className="bg-slate-900/50 border-slate-800 backdrop-blur">
+              <CardHeader>
+                <CardTitle className="text-xl text-slate-100 flex items-center gap-2">
+                  <Target className="w-5 h-5" />
+                  Choose Your Game
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {availableGames.map((game) => (
                   <div
-                    key={room.id}
-                    className="flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+                    key={game.type}
+                    className={`p-4 rounded-lg border-2 cursor-pointer transition-all duration-200 ${
+                      selectedGame === game.type
+                        ? "border-blue-500 bg-blue-500/10"
+                        : "border-slate-700 bg-slate-800/30 hover:border-slate-600"
+                    }`}
+                    onClick={() => setSelectedGame(game.type)}
                   >
-                    <div className="flex-1">
+                    <div className="flex items-center justify-between">
                       <div className="flex items-center space-x-3">
-                        <h3 className="font-medium">{room.name}</h3>
-                        <Badge variant={room.status === "waiting" ? "secondary" : "default"}>
-                          {room.status === "waiting" ? "🟡 Waiting" : "🟢 Playing"}
+                        <div className="text-2xl">{game.name.charAt(0)}</div>
+                        <div>
+                          <h3 className="font-semibold text-slate-100">{game.name}</h3>
+                          <p className="text-sm text-slate-400">
+                            {game.minPlayers}v{game.maxPlayers}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <Badge variant="secondary" className="text-xs">
+                          {game.minPlayers}v{game.maxPlayers}
                         </Badge>
                       </div>
-                      <p className="text-sm text-gray-500 dark:text-gray-400">
-                        {Object.keys(room.players).length}/2 players • Room ID: {room.id.slice(-6)}
-                      </p>
-                    </div>
-                    <div className="flex items-center space-x-2">
-                      {Object.values(room.players).map((player, index) => (
-                        <div
-                          key={index}
-                          className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center text-white text-sm font-medium"
-                          title={player.name}
-                        >
-                          {player.name.charAt(0).toUpperCase()}
-                        </div>
-                      ))}
-                      {Object.keys(room.players).length < 2 && (
-                        <Button
-                          size="sm"
-                          onClick={() => joinRoom(room.id)}
-                          disabled={loading || Object.keys(room.players).includes(user.uid)}
-                        >
-                          {Object.keys(room.players).includes(user.uid) ? "Rejoin" : "Join"}
-                        </Button>
-                      )}
                     </div>
                   </div>
                 ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Player Info & Controls */}
+          <div className="space-y-6">
+            {/* Player Card */}
+            <Card className="bg-slate-900/50 border-slate-800 backdrop-blur">
+              <CardHeader>
+                <CardTitle className="text-lg text-slate-100 flex items-center gap-2">
+                  <Crown className="w-5 h-5" />
+                  Player Stats
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center space-x-3 mb-4">
+                  <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center">
+                    <span className="text-white font-bold text-lg">
+                      {userProfile.username.charAt(0).toUpperCase()}
+                    </span>
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-slate-100">{userProfile.username}</h3>
+                    <p className="text-sm text-slate-400">Level {userProfile.stats.level}</p>
+                  </div>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <div className="text-slate-400">Games Played</div>
+                    <div className="text-slate-100 font-semibold">{userProfile.stats.gamesPlayed}</div>
+                  </div>
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <div className="text-slate-400">Win Rate</div>
+                    <div className="text-slate-100 font-semibold">{userProfile.stats.winRate}%</div>
+                  </div>
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <div className="text-slate-400">Rank</div>
+                    <div className="text-slate-100 font-semibold">{userProfile.stats.rank}</div>
+                  </div>
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <div className="text-slate-400">XP</div>
+                    <div className="text-slate-100 font-semibold">{userProfile.stats.xp}</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Matchmaking Controls */}
+            <Card className="bg-slate-900/50 border-slate-800 backdrop-blur">
+              <CardHeader>
+                <CardTitle className="text-lg text-slate-100 flex items-center gap-2">
+                  <Zap className="w-5 h-5" />
+                  Quick Match
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {/* Show cooldown warning if active */}
+                {resultScreenCooldown > 0 && (
+                  <div className="mb-3 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
+                    <div className="flex items-center space-x-2 text-amber-400">
+                      <Clock className="w-4 h-4" />
+                      <span className="text-sm font-medium">
+                        Cooldown: {resultScreenCooldown}s remaining
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Show result screen warning if active */}
+                {isOnResultScreen && (
+                  <div className="mb-3 p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
+                    <div className="flex items-center space-x-2 text-red-400">
+                      <AlertCircle className="w-4 h-4" />
+                      <span className="text-sm font-medium">
+                        Please wait for result screen to finish
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {!matchmaking ? (
+                  <Button
+                    onClick={handleStartMatch}
+                    className="w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-semibold py-3"
+                    disabled={!selectedGame || !canEnterMatchmaking}
+                  >
+                    <Search className="w-4 h-4 mr-2" />
+                    {!canEnterMatchmaking ? "Matchmaking Unavailable" : "Find Match"}
+                  </Button>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-center space-x-2 text-slate-300">
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-400"></div>
+                      <span>Searching for opponent...</span>
+                    </div>
+                    <Button
+                      onClick={handleCancelMatchmaking}
+                      variant="outline"
+                      className="w-full border-slate-600 text-slate-300 hover:bg-slate-800"
+                    >
+                      <X className="w-4 h-4 mr-2" />
+                      Cancel Search
+                    </Button>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Online Players */}
+            <Card className="bg-slate-900/50 border-slate-800 backdrop-blur">
+              <CardHeader>
+                <CardTitle className="text-lg text-slate-100 flex items-center gap-2">
+                  <Users className="w-5 h-5" />
+                  Online Players
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2 max-h-40 overflow-y-auto">
+                  {onlineUsers.map((user) => (
+                    <div
+                      key={user.userId}
+                      className="flex items-center justify-between py-2 px-3 bg-slate-800/30 rounded-lg"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <div className="w-2 h-2 bg-green-400 rounded-full"></div>
+                        <span className="text-sm text-slate-300">{user.username}</span>
+                      </div>
+                      <Badge variant="outline" className="text-xs">
+                        {user.status}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
       </div>
     </div>
   )
