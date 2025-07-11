@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { useToast } from "@/hooks/use-toast"
 import { ArrowLeft, RotateCcw, Trophy, Users, Copy, Share2 } from "lucide-react"
 import { Dialog } from "@/components/ui/dialog" // If you have a dialog component, otherwise use window.confirm
+import ResultScreen from "./result-screen"
 
 interface GameState {
   board: (string | null)[]
@@ -32,6 +33,7 @@ interface RoomData {
   gameState: GameState
   players: { [key: string]: Player }
   status: string
+  roomId?: string
 }
 
 export default function GameBoard({
@@ -49,9 +51,6 @@ export default function GameBoard({
   const { toast } = useToast()
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const [leaving, setLeaving] = useState(false);
-  const [showMatchEnd, setShowMatchEnd] = useState(false);
-  const [hasHandledMatchEnd, setHasHandledMatchEnd] = useState(false);
-  const [wasGameFinished, setWasGameFinished] = useState(false);
 
   // Poll game state every second
   useEffect(() => {
@@ -62,23 +61,11 @@ export default function GameBoard({
           const res = await fetch(`http://localhost:3001/game/tictactoe/${roomId}`);
           if (res.ok) {
             const data = await res.json();
+            data.roomId = roomId; // Add roomId to the data
             setRoomData(data);
             setConnectionError(null);
-            if (data.gameState && data.gameState.winner) {
-              setWasGameFinished(true);
-            }
           } else {
-            // If room not found, but game was finished, treat as normal end
-            if (wasGameFinished) {
-              setShowMatchEnd(true);
-              setTimeout(() => {
-                setShowMatchEnd(false);
-                onLeave();
-              }, 2000);
-              return;
-            } else {
-              setConnectionError("Room not found");
-            }
+            setConnectionError("Room not found");
           }
         } catch (error) {
           setConnectionError("Failed to fetch game state");
@@ -90,19 +77,7 @@ export default function GameBoard({
     return () => {
       stopped = true;
     };
-  }, [roomId, wasGameFinished, onLeave]);
-
-  // Show popup and return to home when match ends
-  useEffect(() => {
-    if (roomData && roomData.gameState && roomData.gameState.winner && !hasHandledMatchEnd) {
-      setShowMatchEnd(true);
-      setHasHandledMatchEnd(true);
-      setTimeout(() => {
-        setShowMatchEnd(false);
-        onLeave();
-      }, 2000);
-    }
-  }, [roomData, hasHandledMatchEnd, onLeave]);
+  }, [roomId]);
 
   const makeMove = async (index: number) => {
     if (!roomData || roomData.gameState.board[index] || roomData.gameState.winner) return
@@ -263,6 +238,11 @@ export default function GameBoard({
   const isPlayerO = gameState.playerO === user.uid
   const currentPlayerName = gameState.currentPlayer === "X" ? playerXName : playerOName
 
+  // Show result screen when game ends
+  if (roomData && roomData.gameState && roomData.gameState.winner) {
+    return <ResultScreen roomData={roomData} user={user} onBackToLobby={onLeave} />
+  }
+
   return (
     <div className="min-h-screen p-4">
       <div className="max-w-2xl mx-auto space-y-6">
@@ -372,14 +352,6 @@ export default function GameBoard({
               <Button onClick={() => setShowLeaveConfirm(false)} variant="outline" disabled={leaving}>Cancel</Button>
               <Button onClick={confirmLeave} variant="destructive" disabled={leaving}>Leave & Forfeit</Button>
             </div>
-          </div>
-        </div>
-      )}
-      {showMatchEnd && (
-        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50">
-          <div className="bg-white dark:bg-gray-900 p-6 rounded-lg shadow-lg max-w-sm w-full">
-            <h2 className="text-lg font-bold mb-2">Match Finished</h2>
-            <p className="mb-4">Match finished! Returning to home screen...</p>
           </div>
         </div>
       )}

@@ -119,12 +119,23 @@ app.post("/game/tictactoe/:roomId/move", async (req, res) => {
     // If game finished, update stats
     if (winner || isDraw) {
       await updatePlayerStats(game, winner, isDraw);
-      // Clean up session from Redis
-      await redis.del(sessionKey);
-      const playerX = game.gameState.playerX;
-      const playerO = game.gameState.playerO;
-      await redis.del(`user:${playerX}:session`);
-      await redis.del(`user:${playerO}:session`);
+      // Mark game as finished but keep session for result screen
+      game.status = "finished";
+      await redis.set(sessionKey, JSON.stringify(game));
+      console.log(`Game finished, session kept for result screen: ${roomId}`);
+      // Schedule cleanup after 30 seconds
+      setTimeout(async () => {
+        try {
+          await redis.del(sessionKey);
+          const playerX = game.gameState.playerX;
+          const playerO = game.gameState.playerO;
+          await redis.del(`user:${playerX}:session`);
+          await redis.del(`user:${playerO}:session`);
+          console.log(`Auto-cleaned up session after timeout: ${roomId}`);
+        } catch (error) {
+          console.error("Error in auto-cleanup:", error);
+        }
+      }, 30000);
     }
     res.json(game);
   } catch (error) {
@@ -167,15 +178,51 @@ app.post("/game/tictactoe/:roomId/leave", async (req, res) => {
     await redis.set(sessionKey, JSON.stringify(game));
     // Update stats in Firestore
     await updatePlayerStats(game, gameState.winner, false, userId);
-    // Clean up session from Redis
+    console.log(`Player forfeited, session kept for result screen: ${roomId}`);
+    // Schedule cleanup after 30 seconds
+    setTimeout(async () => {
+      try {
+        await redis.del(sessionKey);
+        const playerX = gameState.playerX;
+        const playerO = gameState.playerO;
+        await redis.del(`user:${playerX}:session`);
+        await redis.del(`user:${playerO}:session`);
+        console.log(`Auto-cleaned up session after timeout: ${roomId}`);
+      } catch (error) {
+        console.error("Error in auto-cleanup:", error);
+      }
+    }, 30000);
+    res.json({ message: "Player left, opponent wins", winner: winnerId });
+  } catch (error) {
+    console.error("Leave game error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST cleanup game session
+app.post("/game/tictactoe/:roomId/cleanup", async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const sessionKey = `tictactoe:session:${roomId}`;
+    const sessionData = await redis.get(sessionKey);
+    if (!sessionData) {
+      return res.status(404).json({ error: "Game not found" });
+    }
+    const game = JSON.parse(sessionData);
+    const { gameState } = game;
+    if (!gameState) {
+      return res.status(400).json({ error: "Invalid game state" });
+    }
+    // Delete session and user mappings
     await redis.del(sessionKey);
     const playerX = gameState.playerX;
     const playerO = gameState.playerO;
     await redis.del(`user:${playerX}:session`);
     await redis.del(`user:${playerO}:session`);
-    res.json({ message: "Player left, opponent wins", winner: winnerId });
+    console.log(`Manually cleaned up session: ${roomId}`);
+    res.json({ message: "Session cleaned up" });
   } catch (error) {
-    console.error("Leave game error:", error);
+    console.error("Cleanup error:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
