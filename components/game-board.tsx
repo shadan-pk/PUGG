@@ -1,8 +1,6 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { doc, onSnapshot, updateDoc } from "firebase/firestore"
-import { db } from "@/lib/firebase"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -20,7 +18,7 @@ interface GameState {
 
 interface Player {
   name: string
-  email: string
+  email?: string
 }
 
 interface MockUser {
@@ -49,119 +47,53 @@ export default function GameBoard({
   const [connectionError, setConnectionError] = useState<string | null>(null)
   const { toast } = useToast()
 
+  // Poll game state every second
   useEffect(() => {
-    console.log("🎮 Setting up Firestore listener for room:", roomId)
-
-    // Validate roomId
-    if (!roomId || roomId.trim() === "") {
-      console.error("❌ Invalid room ID:", roomId)
-      setConnectionError("Invalid room ID")
-      return
-    }
-
-    try {
-      const roomRef = doc(db, "rooms", roomId)
-
-      const unsubscribe = onSnapshot(
-        roomRef,
-        (docSnapshot) => {
-          console.log("📡 Room snapshot received for:", roomId)
-
-          if (docSnapshot.exists()) {
-            const data = docSnapshot.data() as RoomData
-            console.log("🎯 Room data updated:", data)
-            setRoomData(data)
-            setConnectionError(null)
+    let stopped = false;
+    async function pollGame() {
+      while (!stopped) {
+        try {
+          const res = await fetch(`http://localhost:3001/game/tictactoe/${roomId}`);
+          if (res.ok) {
+            const data = await res.json();
+            setRoomData(data);
+            setConnectionError(null);
           } else {
-            console.log("❌ Room not found:", roomId)
-            setConnectionError("Room not found")
-            toast({
-              title: "Room Not Found",
-              description: "This room no longer exists.",
-              variant: "destructive",
-            })
+            setConnectionError("Room not found");
           }
-        },
-        (error) => {
-          console.error("❌ Firestore listener error:", error)
-          setConnectionError(error.message)
-          toast({
-            title: "Connection Error",
-            description: `Failed to connect to room: ${error.message}`,
-            variant: "destructive",
-          })
-        },
-      )
-
-      return () => {
-        console.log("🔇 Cleaning up Firestore listener for room:", roomId)
-        unsubscribe()
+        } catch (error) {
+          setConnectionError("Failed to fetch game state");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
       }
-    } catch (error) {
-      console.error("❌ Error setting up Firestore listener:", error)
-      setConnectionError(`Setup error: ${error}`)
-      toast({
-        title: "Setup Error",
-        description: "Failed to set up room connection.",
-        variant: "destructive",
-      })
     }
-  }, [roomId, onLeave, toast])
+    pollGame();
+    return () => {
+      stopped = true;
+    };
+  }, [roomId]);
 
   const makeMove = async (index: number) => {
     if (!roomData || roomData.gameState.board[index] || roomData.gameState.winner) return
-
-    const { gameState } = roomData
-    const isPlayerX = gameState.playerX === user.uid
-    const isPlayerO = gameState.playerO === user.uid
-    const isCurrentPlayer =
-      (gameState.currentPlayer === "X" && isPlayerX) || (gameState.currentPlayer === "O" && isPlayerO)
-
-    if (!isCurrentPlayer) {
-      toast({
-        title: "Not Your Turn",
-        description: "Please wait for your opponent to make a move.",
-        variant: "destructive",
-      })
-      return
-    }
-
     setLoading(true)
     try {
-      const newBoard = [...gameState.board]
-      newBoard[index] = gameState.currentPlayer
-
-      const winner = checkWinner(newBoard)
-      const isDraw = !winner && newBoard.every((cell) => cell !== null)
-
-      const newGameState = {
-        ...gameState,
-        board: newBoard,
-        currentPlayer: gameState.currentPlayer === "X" ? ("O" as const) : ("X" as const),
-        winner: winner || (isDraw ? "draw" : null),
-        moves: gameState.moves + 1,
-      }
-
-      console.log("🎯 Making move:", { index, player: gameState.currentPlayer, newGameState })
-
-      const roomRef = doc(db, "rooms", roomId)
-      await updateDoc(roomRef, { gameState: newGameState })
-
-      if (winner) {
-        const winnerName =
-          winner === "X" ? roomData.players[gameState.playerX]?.name : roomData.players[gameState.playerO!]?.name
+      const res = await fetch(`http://localhost:3001/game/tictactoe/${roomId}/move`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: user.uid, index }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setRoomData(data);
+      } else {
+        const err = await res.json();
         toast({
-          title: "🎉 Game Over!",
-          description: `${winnerName} wins!`,
-        })
-      } else if (isDraw) {
-        toast({
-          title: "🤝 Game Over!",
-          description: "It's a draw!",
-        })
+          title: "Move Error",
+          description: err.error || "Invalid move.",
+          variant: "destructive",
+        });
       }
     } catch (error) {
-      console.error("❌ Error making move:", error)
       toast({
         title: "Error",
         description: "Failed to make move. Please try again.",
@@ -173,36 +105,11 @@ export default function GameBoard({
   }
 
   const resetGame = async () => {
-    if (!roomData) return
-
-    setLoading(true)
-    try {
-      const newGameState = {
-        ...roomData.gameState,
-        board: Array(9).fill(null),
-        currentPlayer: "X" as const,
-        winner: null,
-        moves: 0,
-      }
-
-      console.log("🔄 Resetting game:", newGameState)
-      const roomRef = doc(db, "rooms", roomId)
-      await updateDoc(roomRef, { gameState: newGameState })
-
-      toast({
-        title: "🔄 Game Reset",
-        description: "Starting a new game!",
-      })
-    } catch (error) {
-      console.error("❌ Error resetting game:", error)
-      toast({
-        title: "Error",
-        description: "Failed to reset game.",
-        variant: "destructive",
-      })
-    } finally {
-      setLoading(false)
-    }
+    toast({
+      title: "Reset Not Supported",
+      description: "Game reset is not implemented in this backend.",
+      variant: "destructive",
+    })
   }
 
   const copyRoomId = async () => {
@@ -226,7 +133,6 @@ export default function GameBoard({
       text: `Join my online Tic-Tac-Toe game. Room ID: ${roomId.slice(-6)}`,
       url: window.location.href,
     }
-
     try {
       if (navigator.share) {
         await navigator.share(shareData)
@@ -236,26 +142,6 @@ export default function GameBoard({
     } catch (error) {
       await copyRoomId()
     }
-  }
-
-  const checkWinner = (board: (string | null)[]): string | null => {
-    const lines = [
-      [0, 1, 2],
-      [3, 4, 5],
-      [6, 7, 8], // rows
-      [0, 3, 6],
-      [1, 4, 7],
-      [2, 5, 8], // columns
-      [0, 4, 8],
-      [2, 4, 6], // diagonals
-    ]
-
-    for (const [a, b, c] of lines) {
-      if (board[a] && board[a] === board[b] && board[a] === board[c]) {
-        return board[a]
-      }
-    }
-    return null
   }
 
   // Handle connection errors
@@ -286,7 +172,7 @@ export default function GameBoard({
       <div className="min-h-screen flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p className="text-gray-600 dark:text-gray-400">Loading game from Firestore...</p>
+          <p className="text-gray-600 dark:text-gray-400">Loading game from server...</p>
           <p className="text-sm text-gray-500 mt-2">Room ID: {roomId.slice(-6)}</p>
           <Button onClick={onLeave} variant="outline" size="sm" className="mt-4 bg-transparent">
             Cancel
@@ -302,7 +188,7 @@ export default function GameBoard({
       <div className="min-h-screen flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p className="text-gray-600 dark:text-gray-400">Loading game from Firestore...</p>
+          <p className="text-gray-600 dark:text-gray-400">Loading game from server...</p>
           <p className="text-sm text-gray-500 mt-2">Room ID: {roomId.slice(-6)}</p>
           <Button onClick={onLeave} variant="outline" size="sm" className="mt-4 bg-transparent">
             Cancel
@@ -367,100 +253,63 @@ export default function GameBoard({
                   <p className="font-medium">{playerXName}</p>
                   <p className="text-sm text-gray-500">Player X</p>
                 </div>
-                {isPlayerX && <Badge variant="secondary">You</Badge>}
               </div>
             </CardContent>
           </Card>
-
-          <Card className={`${isPlayerO ? "ring-2 ring-red-500" : ""}`}>
+          <Card className={`${isPlayerO ? "ring-2 ring-purple-500" : ""}`}>
             <CardContent className="p-4">
               <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 bg-red-600 rounded-full flex items-center justify-center text-white font-bold">
+                <div className="w-10 h-10 bg-purple-600 rounded-full flex items-center justify-center text-white font-bold">
                   O
                 </div>
                 <div>
                   <p className="font-medium">{playerOName}</p>
                   <p className="text-sm text-gray-500">Player O</p>
                 </div>
-                {isPlayerO && <Badge variant="secondary">You</Badge>}
               </div>
             </CardContent>
           </Card>
         </div>
 
+        {/* Game Board */}
+        <div className="grid grid-cols-3 gap-2 bg-slate-800 rounded-lg p-4">
+          {gameState.board.map((cell, idx) => (
+            <button
+              key={idx}
+              className={`w-20 h-20 text-3xl font-bold rounded-lg border-2 flex items-center justify-center transition-all duration-150
+                ${cell === "X" ? "text-blue-500 border-blue-400" : cell === "O" ? "text-purple-500 border-purple-400" : "border-slate-700 hover:border-blue-400 hover:bg-slate-700"}
+                ${gameState.winner && cell === gameState.winner ? "bg-green-100" : ""}
+              `}
+              disabled={!!cell || !!gameState.winner || loading || !isPlayerX && !isPlayerO}
+              onClick={() => makeMove(idx)}
+            >
+              {cell}
+            </button>
+          ))}
+        </div>
+
         {/* Game Status */}
-        <Card>
-          <CardContent className="p-4">
-            <div className="text-center">
-              {gameState.winner ? (
-                <div className="space-y-2">
-                  <Trophy className="h-8 w-8 text-yellow-500 mx-auto" />
-                  <p className="text-xl font-bold">
-                    {gameState.winner === "draw"
-                      ? "🤝 It's a Draw!"
-                      : `🎉 ${gameState.winner === "X" ? playerXName : playerOName} Wins!`}
-                  </p>
-                </div>
-              ) : !gameState.playerO ? (
-                <div className="space-y-2">
-                  <Users className="h-8 w-8 text-gray-400 mx-auto" />
-                  <p className="text-lg">⏳ Waiting for another player...</p>
-                  <p className="text-sm text-gray-500">Share the room ID with a friend!</p>
-                </div>
+        <div className="text-center mt-4">
+          {gameState.winner ? (
+            gameState.winner === "draw" ? (
+              <div className="text-lg font-bold text-yellow-500">🤝 It's a draw!</div>
+            ) : (
+              <div className="text-lg font-bold text-green-600">🎉 {gameState.winner === "X" ? playerXName : playerOName} wins!</div>
+            )
+          ) : (
+            <div className="text-md text-slate-300">
+              {isPlayerX || isPlayerO ? (
+                gameState.currentPlayer === (isPlayerX ? "X" : "O") ? (
+                  <span>Your turn ({gameState.currentPlayer})</span>
+                ) : (
+                  <span>Waiting for opponent...</span>
+                )
               ) : (
-                <div className="space-y-2">
-                  <p className="text-lg">
-                    <span className="font-bold">{currentPlayerName}</span>'s turn
-                  </p>
-                  <Badge variant={gameState.currentPlayer === "X" ? "default" : "destructive"}>
-                    {gameState.currentPlayer}
-                  </Badge>
-                </div>
+                <span>Spectating</span>
               )}
             </div>
-          </CardContent>
-        </Card>
-
-        {/* Game Board */}
-        <Card>
-          <CardContent className="p-6">
-            <div className="grid grid-cols-3 gap-2 max-w-xs mx-auto">
-              {gameState.board.map((cell, index) => (
-                <button
-                  key={index}
-                  onClick={() => makeMove(index)}
-                  disabled={loading || !!cell || !!gameState.winner || !gameState.playerO}
-                  className="aspect-square bg-gray-100 dark:bg-gray-800 border-2 border-gray-300 dark:border-gray-600 rounded-lg text-4xl font-bold hover:bg-gray-200 dark:hover:bg-gray-700 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
-                >
-                  {cell && <span className={cell === "X" ? "text-blue-600" : "text-red-600"}>{cell}</span>}
-                </button>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Game Stats */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-center">📊 Game Statistics</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-3 gap-4 text-center">
-              <div>
-                <p className="text-2xl font-bold">{gameState.moves}</p>
-                <p className="text-sm text-gray-500">Total Moves</p>
-              </div>
-              <div>
-                <p className="text-2xl font-bold">{Object.keys(players).length}/2</p>
-                <p className="text-sm text-gray-500">Players</p>
-              </div>
-              <div>
-                <p className="text-2xl font-bold">🔥</p>
-                <p className="text-sm text-gray-500">Live Game</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+          )}
+        </div>
       </div>
     </div>
   )

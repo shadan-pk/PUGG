@@ -1,101 +1,99 @@
-// import { db } from "../utils/firestore.js";
+// backend/games/tictactoe.js
+import { createClient } from 'redis';
 
-// export async function handleMatchmaking(userId, username) {
-//   const queueRef = db.collection("tictactoe_queue");
+const redis = createClient({ url: 'redis://localhost:6379' }); // adjust if your Docker uses a different host/port
+redis.connect().catch(console.error);
   
-//   // Use a transaction to prevent race conditions
-//   return await db.runTransaction(async (transaction) => {
-//     // First, check if this user is already in queue
-//     const userQueueDoc = await transaction.get(queueRef.doc(userId));
-    
-//     if (userQueueDoc.exists && userQueueDoc.data().status === "matched") {
-//       // User is already matched, return the existing room
-//       return { matched: true, roomId: userQueueDoc.data().roomId };
-//     }
-    
-//     // Add/update player in queue
-//     transaction.set(queueRef.doc(userId), { 
-//       userId, 
-//       username, 
-//       joinedAt: Date.now(),
-//       status: "waiting"
-//     });
-    
-//     // Check for available players (excluding current user)
-//     const snapshot = await transaction.get(
-//       queueRef.where("status", "==", "waiting").orderBy("joinedAt").limit(2)
-//     );
-    
-//     const availablePlayers = snapshot.docs
-//       .map(doc => doc.data())
-//       .filter(player => player.userId !== userId);
-    
-//     // If we have another player available, create a match
-//     if (availablePlayers.length > 0) {
-//       const opponent = availablePlayers[0];
-//       const players = [
-//         { userId, username },
-//         { userId: opponent.userId, username: opponent.username }
-//       ];
-      
-//       // Create game room
-//       const roomRef = db.collection("rooms").doc(); // Generate ID first
-//       transaction.set(roomRef, {
-//         game: "tictactoe",
-//         players: players,
-//         createdAt: Date.now(),
-//         status: "active",
-//         currentPlayer: userId, // First player starts
-//         board: Array(9).fill(null),
-//         winner: null
-//       });
-      
-//       // Mark both players as matched
-//       transaction.update(queueRef.doc(userId), { 
-//         roomId: roomRef.id, 
-//         status: "matched" 
-//       });
-//       transaction.update(queueRef.doc(opponent.userId), { 
-//         roomId: roomRef.id, 
-//         status: "matched" 
-//       });
-      
-//       // Schedule cleanup of queue docs (we'll do this outside the transaction)
-//       setTimeout(async () => {
-//         try {
-//           await Promise.all([
-//             queueRef.doc(userId).delete(),
-//             queueRef.doc(opponent.userId).delete()
-//           ]);
-//         } catch (error) {
-//           console.error("Error cleaning up queue:", error);
-//         }
-//       }, 1000);
-      
-//       return { matched: true, roomId: roomRef.id };
-//     }
-    
-//     return { matched: false };
-//   });
-// }
+export async function handleMatchmaking(userId, username) {
+  const queueKey = 'tictactoe:queue';
+  const sessionPrefix = 'tictactoe:session:';
 
-// // Optional: Add a cleanup function to remove stale queue entries
-// export async function cleanupStaleQueue() {
-//   const queueRef = db.collection("tictactoe_queue");
-//   const staleTime = Date.now() - (5 * 60 * 1000); // 5 minutes ago
-  
-//   const staleSnapshot = await queueRef
-//     .where("joinedAt", "<", staleTime)
-//     .where("status", "==", "waiting")
-//     .get();
-    
-//   const batch = db.batch();
-//   staleSnapshot.docs.forEach(doc => {
-//     batch.delete(doc.ref);
-//   });
-  
-//   if (staleSnapshot.size > 0) {
-//     await batch.commit();
-//     console.log(`Cleaned up ${staleSnapshot.size} stale queue entries`);
-//   }
-// }
+  // Check if user is already in a session
+  const existingSessionId = await redis.get(`user:${userId}:session`);
+  if (existingSessionId) {
+    console.log(`User ${userId} already in session ${existingSessionId}`);
+    return { matched: true, roomId: existingSessionId };
+  }
+
+  // Add user to the matchmaking queue
+  await redis.rPush(queueKey, JSON.stringify({ userId, username }));
+  console.log(`Added ${username} (${userId}) to queue`);
+
+  // Check queue length
+  const queueLength = await redis.lLen(queueKey);
+  console.log(`Queue length after adding ${username}: ${queueLength}`);
+
+  // Only try to match if we have at least 2 players
+  if (queueLength >= 2) {
+    // Try to match two players
+    const players = [];
+    while (players.length < 2) {
+      const playerData = await redis.lPop(queueKey);
+      if (!playerData) break;
+      players.push(JSON.parse(playerData));
+    }
+
+    console.log(`Popped ${players.length} players from queue`);
+
+    if (players.length === 2) {
+      // Create a new session
+      const roomId = `${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+      const sessionKey = sessionPrefix + roomId;
+
+      console.log(`Creating match: ${players[0].username} vs ${players[1].username} in room ${roomId}`);
+
+      // Store session data in Redis
+      const sessionData = {
+        roomId,
+        players: {
+          [players[0].userId]: { name: players[0].username },
+          [players[1].userId]: { name: players[1].username }
+        },
+        createdAt: Date.now(),
+        status: 'active',
+        gameState: {
+          board: Array(9).fill(null),
+          currentPlayer: 'X',
+          winner: null,
+          playerX: players[0].userId,
+          playerO: players[1].userId,
+          moves: 0
+        }
+      };
+      await redis.set(sessionKey, JSON.stringify(sessionData));
+
+      // Map users to session for quick lookup
+      await redis.set(`user:${players[0].userId}:session`, roomId);
+      await redis.set(`user:${players[1].userId}:session`, roomId);
+
+      console.log(`Match created successfully for room ${roomId}`);
+      return { matched: true, roomId };
+    } else {
+      // Put players back in queue if we couldn't match
+      for (const player of players) {
+        await redis.rPush(queueKey, JSON.stringify(player));
+      }
+      console.log(`Put ${players.length} players back in queue`);
+    }
+  }
+
+  // Not enough players yet
+  console.log(`Not enough players for ${username}, waiting...`);
+  return { matched: false };
+}
+
+export async function cancelMatchmaking(userId) {
+  const queueKey = 'tictactoe:queue';
+  // Remove user from queue (inefficient for large queues, but fine for small games)
+  const queue = await redis.lRange(queueKey, 0, -1);
+  for (let i = 0; i < queue.length; i++) {
+    const player = JSON.parse(queue[i]);
+    if (player.userId === userId) {
+      await redis.lRem(queueKey, 1, queue[i]);
+      console.log(`Removed ${player.username} from queue`);
+      break;
+    }
+  }
+  // Optionally, remove session mapping if exists
+  await redis.del(`user:${userId}:session`);
+}
