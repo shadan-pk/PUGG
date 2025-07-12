@@ -360,32 +360,52 @@ app.post("/game/:gameType/:roomId/leave", async (req, res) => {
     if (!gameState) {
       return res.status(400).json({ error: "Invalid game state" });
     }
-    if (gameState.winner) {
+    if (gameState.winner || gameState.finished) {
       // Game already finished, do nothing
       return res.json({ message: "Game already finished" });
     }
-    // Determine the other player
-    let winnerId = null;
-    if (gameState.playerX === userId) {
-      winnerId = gameState.playerO;
-    } else if (gameState.playerO === userId) {
-      winnerId = gameState.playerX;
+    
+    // Use game manager to handle forfeit logic for any game type
+    const gameInstance = gameManager.getGame(gameType);
+    if (!gameInstance) {
+      return res.status(400).json({ error: "Game type not supported" });
+    }
+    
+    // Get players from the game state (handle different game structures)
+    let players = [];
+    if (gameState.playerX && gameState.playerO) {
+      // Tic Tac Toe style
+      players = [gameState.playerX, gameState.playerO];
+    } else if (gameState.players && Array.isArray(gameState.players)) {
+      // Connect Four style
+      players = gameState.players.map(p => p.userId);
     } else {
+      return res.status(400).json({ error: "Invalid game state structure" });
+    }
+    
+    // Find the forfeiting player and determine the winner
+    const forfeitIndex = players.findIndex(p => p === userId);
+    if (forfeitIndex === -1) {
       return res.status(400).json({ error: "User not in this game" });
     }
-    // Set winner and update game state
-    gameState.winner = (gameState.playerX === winnerId) ? "X" : "O";
+    
+    const winnerIndex = (forfeitIndex + 1) % 2;
+    const winnerId = players[winnerIndex];
+    
+    // Mark game as finished
+    gameState.finished = true;
+    gameState.winner = winnerIndex; // Use index for Connect Four, or "X"/"O" for Tic Tac Toe
     game.status = "finished";
+    
     await redis.set(sessionKey, JSON.stringify(game));
+    
     // Update stats in Firestore
     await updatePlayerStats(game, gameState.winner, false, userId);
     
     // Check if result screen tracking already exists
     if (!playersOnResultScreen.has(roomId)) {
       // Initialize result screen tracking for both players
-      const playerX = gameState.playerX;
-      const playerO = gameState.playerO;
-      playersOnResultScreen.set(roomId, new Set([playerX, playerO]));
+      playersOnResultScreen.set(roomId, new Set(players));
       
       // Set timeout for automatic cleanup (60 seconds)
       const timeout = setTimeout(async () => {
@@ -539,43 +559,58 @@ app.post("/game/tictactoe/:roomId/cleanup", async (req, res) => {
 
 async function updatePlayerStats(game, winner, isDraw, forfeitUserId = null) {
   try {
-    const playerX = game.gameState.playerX;
-    const playerO = game.gameState.playerO;
-    const userRefs = [
-      firestore.collection("users").doc(playerX),
-      firestore.collection("users").doc(playerO),
-    ];
-    const updates = [
-      { gamesPlayed: 1, wins: 0, losses: 0, draws: 0 },
-      { gamesPlayed: 1, wins: 0, losses: 0, draws: 0 },
-    ];
-    if (isDraw) {
-      updates[0].draws = 1;
-      updates[1].draws = 1;
-    } else if (winner === "X") {
-      updates[0].wins = 1;
-      updates[1].losses = 1;
-    } else if (winner === "O") {
-      updates[0].losses = 1;
-      updates[1].wins = 1;
+    // Handle different game state structures
+    let players = [];
+    let winnerIndex = null;
+    
+    if (game.gameState.playerX && game.gameState.playerO) {
+      // Tic Tac Toe style
+      players = [game.gameState.playerX, game.gameState.playerO];
+      if (winner === "X") {
+        winnerIndex = 0;
+      } else if (winner === "O") {
+        winnerIndex = 1;
+      }
+    } else if (game.gameState.players && Array.isArray(game.gameState.players)) {
+      // Connect Four style
+      players = game.gameState.players.map(p => p.userId);
+      winnerIndex = winner; // winner is already the index for Connect Four
+    } else {
+      console.error("Unknown game state structure for stats update");
+      return;
     }
+    
+    const userRefs = players.map(playerId => firestore.collection("users").doc(playerId));
+    const updates = players.map(() => ({ gamesPlayed: 1, wins: 0, losses: 0, draws: 0 }));
+    
+    if (isDraw) {
+      // Both players get a draw
+      updates.forEach(update => update.draws = 1);
+    } else if (winnerIndex !== null && winnerIndex !== undefined) {
+      // Winner gets a win, loser gets a loss
+      updates[winnerIndex].wins = 1;
+      const loserIndex = (winnerIndex + 1) % 2;
+      updates[loserIndex].losses = 1;
+    }
+    
     // If forfeit, adjust winner/loser
     if (forfeitUserId) {
-      if (playerX === forfeitUserId) {
-        updates[0].losses = 1;
-        updates[0].wins = 0;
-        updates[1].wins = 1;
-        updates[1].losses = 0;
-      } else if (playerO === forfeitUserId) {
-        updates[1].losses = 1;
-        updates[1].wins = 0;
-        updates[0].wins = 1;
-        updates[0].losses = 0;
+      const forfeitIndex = players.findIndex(p => p === forfeitUserId);
+      if (forfeitIndex !== -1) {
+        // Forfeiting player gets a loss
+        updates[forfeitIndex].losses = 1;
+        updates[forfeitIndex].wins = 0;
+        
+        // Other player gets a win
+        const winnerIndex = (forfeitIndex + 1) % 2;
+        updates[winnerIndex].wins = 1;
+        updates[winnerIndex].losses = 0;
       }
     }
+    
     // Use Firestore transactions to update stats
     await firestore.runTransaction(async (t) => {
-      for (let i = 0; i < 2; i++) {
+      for (let i = 0; i < players.length; i++) {
         const userRef = userRefs[i];
         const userSnap = await t.get(userRef);
         const stats = userSnap.exists && userSnap.data().stats ? userSnap.data().stats : { gamesPlayed: 0, wins: 0, losses: 0, draws: 0 };
@@ -587,7 +622,7 @@ async function updatePlayerStats(game, winner, isDraw, forfeitUserId = null) {
         });
       }
     });
-    console.log(`Updated stats for ${playerX} and ${playerO}`);
+    console.log(`Updated stats for ${players.join(' and ')}`);
   } catch (error) {
     console.error("Error updating player stats:", error);
   }
@@ -638,19 +673,27 @@ async function cleanupResultScreen(roomId) {
       // Delete session and user mappings
       await redis.del(sessionKey);
       if (gameState) {
-        const playerX = gameState.playerX;
-        const playerO = gameState.playerO;
+        // Handle different game state structures
+        let players = [];
+        if (gameState.playerX && gameState.playerO) {
+          // Tic Tac Toe style
+          players = [gameState.playerX, gameState.playerO];
+        } else if (gameState.players && Array.isArray(gameState.players)) {
+          // Connect Four style
+          players = gameState.players.map(p => p.userId);
+        }
         
         // Delete user-to-session mappings
-        await redis.del(`user:${playerX}:session`);
-        await redis.del(`user:${playerO}:session`);
+        for (const playerId of players) {
+          await redis.del(`user:${playerId}:session`);
+        }
         
         // Also remove from queue if they're still there
         const queueKey = `${gameType}:queue`;
         const queue = await redis.lRange(queueKey, 0, -1);
         for (let i = 0; i < queue.length; i++) {
           const player = JSON.parse(queue[i]);
-          if (player.userId === playerX || player.userId === playerO) {
+          if (players.includes(player.userId)) {
             await redis.lRem(queueKey, 1, queue[i]);
             console.log(`Removed ${player.userId} from queue during cleanup`);
           }

@@ -89,7 +89,8 @@ export class ConnectFourGame extends BaseGame {
     // Check for win
     const winner = this.checkWinner(board);
     if (winner !== null) {
-      return { finished: true, winner: gameState.players[winner], isDraw: false };
+      // Set winner to userId, not player object
+      return { finished: true, winner: gameState.players[winner].userId, isDraw: false };
     }
 
     // Check for draw (board is full)
